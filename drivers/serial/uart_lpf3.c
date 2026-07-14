@@ -92,6 +92,10 @@ struct uart_lpf3_data {
 	size_t rx_processed_len;
 	uint8_t *rx_next_buf;
 	size_t rx_next_len;
+
+	struct k_work_delayable rx_timeout_work;
+	int32_t rx_timeout_us;
+	size_t rx_last_count;
 #endif /* CONFIG_UART_LPF3_DMA_DRIVEN */
 #ifdef CONFIG_PM_DEVICE
 	ATOMIC_DEFINE(pm_lock, UART_LPF3_PM_LOCK_COUNT);
@@ -593,10 +597,6 @@ static int uart_lpf3_async_rx_enable(const struct device *dev, uint8_t *buf, siz
 		.user_data = NULL,
 	};
 
-	if (timeout != SYS_FOREVER_US) {
-		return -ENOTSUP;
-	}
-
 	key = irq_lock();
 
 	if (data->rx_len) {
@@ -627,6 +627,20 @@ static int uart_lpf3_async_rx_enable(const struct device *dev, uint8_t *buf, siz
 	data->rx_buf = buf;
 	data->rx_len = len;
 	data->rx_processed_len = 0;
+	data->rx_last_count = 0;
+	data->rx_timeout_us = timeout;
+
+	/*
+	 * The RX FIFO level/timeout interrupts cannot be used for idle
+	 * detection here: the DMA drains the FIFO as soon as bytes land in it,
+	 * so UART_INT_RX/UART_INT_RT never fire (and leaving FIFO interrupts
+	 * enabled alongside DMA is a documented double-service hazard). Instead,
+	 * poll the DMA transfer progress at half the requested timeout period
+	 * and deliver the bytes received so far once the count stops changing.
+	 */
+	if (timeout != SYS_FOREVER_US) {
+		k_work_reschedule(&data->rx_timeout_work, K_USEC(MAX(timeout / 2, 1)));
+	}
 
 	/* Request next buffer */
 	if (data->async_callback) {
@@ -686,6 +700,45 @@ static void uart_lpf3_notify_rx_processed(struct uart_lpf3_data *data, size_t pr
 	data->async_callback(data->dev, &evt, data->async_user_data);
 }
 
+static void uart_lpf3_async_rx_timeout(struct k_work *work)
+{
+	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
+	struct uart_lpf3_data *data = CONTAINER_OF(dwork, struct uart_lpf3_data,
+						   rx_timeout_work);
+	const struct uart_lpf3_config *config = data->dev->config;
+	struct dma_status status;
+	size_t rx_count;
+	unsigned int key;
+
+	key = irq_lock();
+
+	if (data->rx_len == 0) {
+		/* RX was disabled after this work was submitted */
+		irq_unlock(key);
+		return;
+	}
+
+	if (dma_get_status(config->dma_dev, config->dma_channel_rx, &status) == 0) {
+		rx_count = data->rx_len - status.pending_length;
+
+		/*
+		 * Only deliver bytes whose count has been stable for a full
+		 * poll period, so that data still streaming in is reported as a
+		 * single UART_RX_RDY once the line goes idle instead of
+		 * arbitrary mid-stream fragments.
+		 */
+		if (rx_count == data->rx_last_count) {
+			uart_lpf3_notify_rx_processed(data, rx_count);
+		} else {
+			data->rx_last_count = rx_count;
+		}
+	}
+
+	k_work_reschedule(&data->rx_timeout_work, K_USEC(MAX(data->rx_timeout_us / 2, 1)));
+
+	irq_unlock(key);
+}
+
 static int uart_lpf3_async_rx_disable(const struct device *dev)
 {
 	const struct uart_lpf3_config *config = dev->config;
@@ -703,13 +756,14 @@ static int uart_lpf3_async_rx_disable(const struct device *dev)
 		goto unlock;
 	}
 
+	k_work_cancel_delayable(&data->rx_timeout_work);
+
 	dma_stop(config->dma_dev, config->dma_channel_rx);
 
 	/* Unlock PM */
 	uart_lpf3_pm_policy_state_lock_put(data, UART_LPF3_PM_LOCK_RX);
 
-	if (dma_get_status(config->dma_dev, config->dma_channel_rx, &status) == 0 &&
-	    status.pending_length) {
+	if (dma_get_status(config->dma_dev, config->dma_channel_rx, &status) == 0) {
 		rx_processed = data->rx_len - status.pending_length;
 
 		uart_lpf3_notify_rx_processed(data, rx_processed);
@@ -759,6 +813,8 @@ static void uart_lpf3_isr(const struct device *dev)
 #if CONFIG_UART_LPF3_DMA_DRIVEN
 	const struct uart_lpf3_config *config = dev->config;
 	struct uart_event evt;
+	const uint8_t *tx_buf;
+	size_t tx_len;
 	unsigned int key;
 	uint32_t int_status = UARTIntStatus(config->reg, true);
 #endif
@@ -776,17 +832,14 @@ static void uart_lpf3_isr(const struct device *dev)
 	 * It is not signaled on the DMA dedicated interrupt.
 	 */
 	if (int_status & UART_INT_TXDMADONE) {
+		UARTClearInt(config->reg, UART_INT_TXDMADONE);
+
 		k_work_cancel_delayable(&data->tx_timeout_work);
 
 		key = irq_lock();
 
-		if (data->tx_len && data->async_callback) {
-			evt.type = UART_TX_DONE;
-			evt.data.tx.buf = data->tx_buf;
-			evt.data.tx.len = data->tx_len;
-
-			data->async_callback(dev, &evt, data->async_user_data);
-		}
+		tx_buf = data->tx_buf;
+		tx_len = data->tx_len;
 
 		data->tx_buf = NULL;
 		data->tx_len = 0;
@@ -794,13 +847,32 @@ static void uart_lpf3_isr(const struct device *dev)
 		/* Unlock PM */
 		uart_lpf3_pm_policy_state_lock_put(data, UART_LPF3_PM_LOCK_TX);
 
-		irq_unlock(key);
+		/*
+		 * Clear the TX state before running the callback, so that a new
+		 * uart_tx() chained from the UART_TX_DONE callback is not
+		 * rejected with -EBUSY.
+		 */
+		if (tx_len && data->async_callback) {
+			evt.type = UART_TX_DONE;
+			evt.data.tx.buf = tx_buf;
+			evt.data.tx.len = tx_len;
 
-		UARTClearInt(config->reg, UART_INT_TXDMADONE);
+			data->async_callback(dev, &evt, data->async_user_data);
+		}
+
+		irq_unlock(key);
 	}
 
 	if (int_status & UART_INT_RXDMADONE) {
+		UARTClearInt(config->reg, UART_INT_RXDMADONE);
+
 		key = irq_lock();
+
+		if (data->rx_len == 0) {
+			/* RX already stopped by uart_lpf3_async_rx_disable() */
+			irq_unlock(key);
+			return;
+		}
 
 		uart_lpf3_notify_rx_processed(data, data->rx_len);
 
@@ -815,6 +887,8 @@ static void uart_lpf3_isr(const struct device *dev)
 			/* If no next buffer, end the transfer */
 			data->rx_buf = NULL;
 			data->rx_len = 0;
+
+			k_work_cancel_delayable(&data->rx_timeout_work);
 
 			if (data->async_callback) {
 				evt.type = UART_RX_DISABLED;
@@ -831,6 +905,7 @@ static void uart_lpf3_isr(const struct device *dev)
 			data->rx_next_buf = NULL;
 			data->rx_next_len = 0;
 			data->rx_processed_len = 0;
+			data->rx_last_count = 0;
 
 			dma_reload(config->dma_dev, config->dma_channel_rx,
 				   (uint32_t)UART_LPF3_REG_GET(config->reg, UART_O_DR),
@@ -847,8 +922,6 @@ static void uart_lpf3_isr(const struct device *dev)
 		}
 
 		irq_unlock(key);
-
-		UARTClearInt(config->reg, UART_INT_RXDMADONE);
 	}
 #endif
 }
@@ -925,6 +998,7 @@ static int uart_lpf3_init_common(const struct device *dev)
 	UARTEnableInt(config->reg, UART_INT_TXDMADONE | UART_INT_RXDMADONE);
 
 	k_work_init_delayable(&data->tx_timeout_work, uart_lpf3_async_tx_timeout);
+	k_work_init_delayable(&data->rx_timeout_work, uart_lpf3_async_rx_timeout);
 
 	data->dev = dev;
 #endif
