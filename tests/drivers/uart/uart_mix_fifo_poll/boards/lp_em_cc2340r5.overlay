@@ -1,0 +1,31 @@
+/*
+ * Copyright (c) 2026 Texas Instruments Incorporated
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * lp_em_cc2340r5 has a single UART (uart0), normally the console. To test the
+ * UART we free it: the console moves to SEGGER RTT (see lp_em_cc2340r5.conf)
+ * and uart0 becomes the DUT.
+ *
+ * Loopback: external jumper DIO20 (uart0 TXD) -> DIO22 (uart0 RXD).
+ *
+ * uart_mix_fifo_poll needs a counter for its timing loop: alias counter_dev to
+ * lgpt0, which the board enables and whose PWM children are unused (only
+ * pwm5/pwm6 on lgpt1/lgpt2 are active). The LGPT counter driver
+ * (ti,cc23x0-lgpt) provides the periodic top-value callback the test relies on.
+ */
+
+/ {
+	chosen {
+		/delete-property/ zephyr,console;
+		/delete-property/ zephyr,shell-uart;
+	};
+};
+
+dut: &uart0 {
+	status = "okay";
+	current-speed = <115200>;
+};
+
+counter_dev: &lgpt0 {
+	status = "okay";
+};
