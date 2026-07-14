@@ -30,22 +30,30 @@
 #include <inc/hw_memmap.h>
 
 #ifdef CONFIG_UART_LPF3_DMA_DRIVEN
+#include <driverlib/udma.h>
+
 #define UART_LPF3_REG_GET(base, offset) ((base) + (offset))
 /*
- * For each DMA channel, burst transfer and single transfer request signals
- * are not mutually exclusive, and both can be asserted at the same time.
- * For example, when there is more data than the watermark level in the
- * TX (or RX) FIFO, the burst transfer request and the single transfer
- * requests are asserted.
- * When a burst request is detected, the DMA controller transfers the number
- * of items that is the lesser of the arbitration size or the number of items
- * remaining in the transfer. Therefore, the arbitration size must be the same
- * as the number of data items that the peripheral can accommodate when making
- * a burst request. Since UART, which uses a mix of single or burst requests,
- * can generate a burst request based on the FIFO trigger level (1/2 full),
- * the burst length is set to half the FIFO size.
+ * Burst-only uDMA servicing, mirroring TI's UART2LPF3 SDK driver.
+ *
+ * Errata UDMA_01 (SWRZ161; the SDK applies it to the whole LPF3 family): when a
+ * uDMA access is held up in the interconnect write buffers after an arbitration
+ * loss, the peripheral can raise a spurious second single/burst request. If the
+ * uDMA services single requests, this corrupts the stream (RX: a DR read races
+ * the FIFO fill and returns torn data; TX: a write is dropped on a full FIFO).
+ * The symptom is data corruption with the item count preserved and no error
+ * flag, worsening with sustained throughput and baud rate.
+ *
+ * Workaround per TI: respond to burst requests only (UDMA_ATTR_USEBURST) with
+ * the SDK-validated watermark/arbitration pairing:
+ *   RX: IFLS 6/8 (burst request at >= 6 of 8 FIFO entries), arbitration 4
+ *   TX: IFLS 2/8 (burst request at <= 2 filled / 6 empty), arbitration 2
+ * With single requests disabled, a sub-watermark RX tail never raises a burst
+ * request, so the CPU drains those stragglers on the RX-timeout interrupt
+ * (UART_INT_RT), exactly like the SDK driver.
  */
-#define UART_LPF3_BURST_LEN 4
+#define UART_LPF3_RX_BURST_LEN 2
+#define UART_LPF3_TX_BURST_LEN 2
 #endif
 
 struct uart_lpf3_config {
@@ -93,9 +101,7 @@ struct uart_lpf3_data {
 	uint8_t *rx_next_buf;
 	size_t rx_next_len;
 
-	struct k_work_delayable rx_timeout_work;
 	int32_t rx_timeout_us;
-	size_t rx_last_count;
 #endif /* CONFIG_UART_LPF3_DMA_DRIVEN */
 #ifdef CONFIG_PM_DEVICE
 	ATOMIC_DEFINE(pm_lock, UART_LPF3_PM_LOCK_COUNT);
@@ -255,6 +261,11 @@ static int uart_lpf3_configure(const struct device *dev, const struct uart_confi
 
 	/* Make use of the FIFO to reduce chances of data being lost */
 	UARTEnableFifo(config->reg);
+
+#ifdef CONFIG_UART_LPF3_DMA_DRIVEN
+	/* Watermarks paired with the uDMA arbitration sizes (see UDMA_01 note) */
+	UARTSetFifoLevel(config->reg, UART_FIFO_TX2_8, UART_FIFO_RX6_8);
+#endif
 
 	data->uart_config = *cfg;
 
@@ -463,8 +474,8 @@ static int uart_lpf3_async_tx(const struct device *dev, const uint8_t *buf, size
 		.head_block = &block_cfg_tx,
 		.source_data_size = 1,
 		.dest_data_size = 1,
-		.source_burst_length = UART_LPF3_BURST_LEN,
-		.dest_burst_length = UART_LPF3_BURST_LEN,
+		.source_burst_length = UART_LPF3_TX_BURST_LEN,
+		.dest_burst_length = UART_LPF3_TX_BURST_LEN,
 		.dma_callback = NULL,
 		.user_data = NULL,
 	};
@@ -485,6 +496,9 @@ static int uart_lpf3_async_tx(const struct device *dev, const uint8_t *buf, size
 	if (ret) {
 		return ret;
 	}
+
+	/* Respond to burst requests only (UDMA_01 workaround) */
+	uDMAEnableChannelAttribute(BIT(config->dma_channel_tx), UDMA_ATTR_USEBURST);
 
 	/* Disable DMA trigger */
 	UARTDisableDMA(config->reg, UART_DMA_TX);
@@ -591,8 +605,8 @@ static int uart_lpf3_async_rx_enable(const struct device *dev, uint8_t *buf, siz
 		.head_block = &block_cfg_rx,
 		.source_data_size = 1,
 		.dest_data_size = 1,
-		.source_burst_length = UART_LPF3_BURST_LEN,
-		.dest_burst_length = UART_LPF3_BURST_LEN,
+		.source_burst_length = UART_LPF3_RX_BURST_LEN,
+		.dest_burst_length = UART_LPF3_RX_BURST_LEN,
 		.dma_callback = NULL,
 		.user_data = NULL,
 	};
@@ -609,6 +623,9 @@ static int uart_lpf3_async_rx_enable(const struct device *dev, uint8_t *buf, siz
 		goto unlock;
 	}
 
+	/* Respond to burst requests only (UDMA_01 workaround) */
+	uDMAEnableChannelAttribute(BIT(config->dma_channel_rx), UDMA_ATTR_USEBURST);
+
 	/* Disable DMA trigger */
 	UARTDisableDMA(config->reg, UART_DMA_RX);
 
@@ -624,23 +641,31 @@ static int uart_lpf3_async_rx_enable(const struct device *dev, uint8_t *buf, siz
 	/* Enable DMA trigger to start the transfer */
 	UARTEnableDMA(config->reg, UART_DMA_RX);
 
+	/*
+	 * With burst-only servicing (UDMA_01 workaround) a sub-watermark RX tail
+	 * never raises a burst request, so bytes below the FIFO watermark are left
+	 * in the FIFO. Scavenge them by CPU on the RX-timeout interrupt (UART_INT_RT,
+	 * asserted after 32 idle bit times); that handler only moves bytes into the
+	 * buffer, it never notifies, so it does not double-serve the poll below.
+	 */
+	UARTClearInt(config->reg, UART_INT_RT);
+	UARTEnableInt(config->reg, UART_INT_RT);
+
 	data->rx_buf = buf;
 	data->rx_len = len;
 	data->rx_processed_len = 0;
-	data->rx_last_count = 0;
 	data->rx_timeout_us = timeout;
 
 	/*
-	 * The RX FIFO level/timeout interrupts cannot be used for idle
-	 * detection here: the DMA drains the FIFO as soon as bytes land in it,
-	 * so UART_INT_RX/UART_INT_RT never fire (and leaving FIFO interrupts
-	 * enabled alongside DMA is a documented double-service hazard). Instead,
-	 * poll the DMA transfer progress at half the requested timeout period
-	 * and deliver the bytes received so far once the count stops changing.
+	 * Delivery is driven inline by the RX-timeout (UART_INT_RT) interrupt,
+	 * which fires only when the line goes idle. With burst-only servicing a
+	 * partial buffer always strands a few sub-watermark bytes in the FIFO, so
+	 * RT is guaranteed to fire for it; the ISR then delivers what has been
+	 * received. Reading the DMA count only at idle (never mid-transfer) is
+	 * what avoids the uDMA arbitration-loss torn reads a periodic poll caused
+	 * (TRM 15.3.3; the TI SDK is likewise purely RT/DMADONE driven). Nothing
+	 * to schedule here.
 	 */
-	if (timeout != SYS_FOREVER_US) {
-		k_work_reschedule(&data->rx_timeout_work, K_USEC(MAX(timeout / 2, 1)));
-	}
 
 	/* Request next buffer */
 	if (data->async_callback) {
@@ -700,45 +725,6 @@ static void uart_lpf3_notify_rx_processed(struct uart_lpf3_data *data, size_t pr
 	data->async_callback(data->dev, &evt, data->async_user_data);
 }
 
-static void uart_lpf3_async_rx_timeout(struct k_work *work)
-{
-	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
-	struct uart_lpf3_data *data = CONTAINER_OF(dwork, struct uart_lpf3_data,
-						   rx_timeout_work);
-	const struct uart_lpf3_config *config = data->dev->config;
-	struct dma_status status;
-	size_t rx_count;
-	unsigned int key;
-
-	key = irq_lock();
-
-	if (data->rx_len == 0) {
-		/* RX was disabled after this work was submitted */
-		irq_unlock(key);
-		return;
-	}
-
-	if (dma_get_status(config->dma_dev, config->dma_channel_rx, &status) == 0) {
-		rx_count = data->rx_len - status.pending_length;
-
-		/*
-		 * Only deliver bytes whose count has been stable for a full
-		 * poll period, so that data still streaming in is reported as a
-		 * single UART_RX_RDY once the line goes idle instead of
-		 * arbitrary mid-stream fragments.
-		 */
-		if (rx_count == data->rx_last_count) {
-			uart_lpf3_notify_rx_processed(data, rx_count);
-		} else {
-			data->rx_last_count = rx_count;
-		}
-	}
-
-	k_work_reschedule(&data->rx_timeout_work, K_USEC(MAX(data->rx_timeout_us / 2, 1)));
-
-	irq_unlock(key);
-}
-
 static int uart_lpf3_async_rx_disable(const struct device *dev)
 {
 	const struct uart_lpf3_config *config = dev->config;
@@ -756,7 +742,7 @@ static int uart_lpf3_async_rx_disable(const struct device *dev)
 		goto unlock;
 	}
 
-	k_work_cancel_delayable(&data->rx_timeout_work);
+	UARTDisableInt(config->reg, UART_INT_RT);
 
 	dma_stop(config->dma_dev, config->dma_channel_rx);
 
@@ -801,6 +787,73 @@ unlock:
 	irq_unlock(key);
 
 	return ret;
+}
+
+/*
+ * Complete the current RX buffer: deliver the remaining bytes, release the
+ * buffer, then either chain to the next buffer or end reception. Must be called
+ * with interrupts locked and data->rx_len != 0. Shared by the RXDMADONE
+ * (buffer full) and RX-timeout straggler (buffer drained early) paths.
+ */
+static void uart_lpf3_rx_buf_complete(const struct device *dev)
+{
+	const struct uart_lpf3_config *config = dev->config;
+	struct uart_lpf3_data *data = dev->data;
+	struct uart_event evt;
+
+	uart_lpf3_notify_rx_processed(data, data->rx_len);
+
+	if (data->async_callback) {
+		evt.type = UART_RX_BUF_RELEASED;
+		evt.data.rx.buf = data->rx_buf;
+
+		data->async_callback(dev, &evt, data->async_user_data);
+	}
+
+	if (data->rx_next_len == 0) {
+		/* If no next buffer, end the transfer */
+		data->rx_buf = NULL;
+		data->rx_len = 0;
+
+		UARTDisableInt(config->reg, UART_INT_RT);
+
+		if (data->async_callback) {
+			evt.type = UART_RX_DISABLED;
+
+			data->async_callback(dev, &evt, data->async_user_data);
+		}
+
+		/* Unlock PM */
+		uart_lpf3_pm_policy_state_lock_put(data, UART_LPF3_PM_LOCK_RX);
+	} else {
+		/* Otherwise, load next buffer and start the transfer */
+		data->rx_buf = data->rx_next_buf;
+		data->rx_len = data->rx_next_len;
+		data->rx_next_buf = NULL;
+		data->rx_next_len = 0;
+		data->rx_processed_len = 0;
+
+		dma_reload(config->dma_dev, config->dma_channel_rx,
+			   (uint32_t)UART_LPF3_REG_GET(config->reg, UART_O_DR),
+			   (uint32_t)data->rx_buf, data->rx_len);
+
+		dma_start(config->dma_dev, config->dma_channel_rx);
+
+		/*
+		 * The uDMA clears USEBURST when a transfer completes, so the
+		 * next buffer would fall back to single requests (FIFO drained
+		 * empty -> UDMA_01 torn reads return, and the RX-timeout never
+		 * fires for a partial buffer). Re-apply it for every buffer.
+		 */
+		uDMAEnableChannelAttribute(BIT(config->dma_channel_rx), UDMA_ATTR_USEBURST);
+
+		/* Request a new buffer */
+		if (data->async_callback) {
+			evt.type = UART_RX_BUF_REQUEST;
+
+			data->async_callback(dev, &evt, data->async_user_data);
+		}
+	}
 }
 
 #endif /* CONFIG_UART_LPF3_DMA_DRIVEN */
@@ -874,50 +927,73 @@ static void uart_lpf3_isr(const struct device *dev)
 			return;
 		}
 
-		uart_lpf3_notify_rx_processed(data, data->rx_len);
+		uart_lpf3_rx_buf_complete(dev);
 
-		if (data->async_callback) {
-			evt.type = UART_RX_BUF_RELEASED;
-			evt.data.rx.buf = data->rx_buf;
+		irq_unlock(key);
+	}
 
-			data->async_callback(dev, &evt, data->async_user_data);
-		}
+	if (int_status & UART_INT_RT) {
+		UARTClearInt(config->reg, UART_INT_RT);
 
-		if (data->rx_next_len == 0) {
-			/* If no next buffer, end the transfer */
-			data->rx_buf = NULL;
-			data->rx_len = 0;
+		key = irq_lock();
 
-			k_work_cancel_delayable(&data->rx_timeout_work);
+		if (data->rx_len != 0) {
+			struct dma_status rx_stat;
+			size_t pos;
 
-			if (data->async_callback) {
-				evt.type = UART_RX_DISABLED;
+			/*
+			 * Single requests are disabled (UDMA_01 workaround), so
+			 * bytes below the RX FIFO watermark never trigger the DMA.
+			 * On RX idle, pause the DMA, drain the stragglers by CPU
+			 * into the buffer, deliver everything received so far, then
+			 * resume the DMA over the remainder. Delivering here is
+			 * contention-free (idle, no burst in flight) and, unlike a
+			 * deferred timer, cannot race an active transfer after a
+			 * mid-stream buffer swap.
+			 */
+			UARTDisableDMA(config->reg, UART_DMA_RX);
+			dma_stop(config->dma_dev, config->dma_channel_rx);
 
-				data->async_callback(dev, &evt, data->async_user_data);
+			if (dma_get_status(config->dma_dev, config->dma_channel_rx,
+					   &rx_stat) == 0) {
+				pos = data->rx_len - rx_stat.pending_length;
+
+				while (pos < data->rx_len &&
+				       UARTCharAvailable(config->reg)) {
+					data->rx_buf[pos++] =
+						UARTGetCharNonBlocking(config->reg);
+				}
+
+				if (pos == data->rx_len) {
+					uart_lpf3_rx_buf_complete(dev);
+				} else {
+					/*
+					 * Deliver the partial buffer on inactivity,
+					 * unless the caller asked for no timeout
+					 * (SYS_FOREVER: buffer-driven delivery only).
+					 */
+					if (data->rx_timeout_us != SYS_FOREVER_US) {
+						uart_lpf3_notify_rx_processed(data, pos);
+					}
+
+					dma_reload(config->dma_dev,
+						   config->dma_channel_rx,
+						   (uint32_t)UART_LPF3_REG_GET(
+							   config->reg, UART_O_DR),
+						   (uint32_t)&data->rx_buf[pos],
+						   data->rx_len - pos);
+					dma_start(config->dma_dev,
+						  config->dma_channel_rx);
+
+					/* uDMA clears USEBURST on completion */
+					uDMAEnableChannelAttribute(
+						BIT(config->dma_channel_rx),
+						UDMA_ATTR_USEBURST);
+				}
 			}
 
-			/* Unlock PM */
-			uart_lpf3_pm_policy_state_lock_put(data, UART_LPF3_PM_LOCK_RX);
-		} else {
-			/* Otherwise, load next buffer and start the transfer */
-			data->rx_buf = data->rx_next_buf;
-			data->rx_len = data->rx_next_len;
-			data->rx_next_buf = NULL;
-			data->rx_next_len = 0;
-			data->rx_processed_len = 0;
-			data->rx_last_count = 0;
-
-			dma_reload(config->dma_dev, config->dma_channel_rx,
-				   (uint32_t)UART_LPF3_REG_GET(config->reg, UART_O_DR),
-				   (uint32_t)data->rx_buf, data->rx_len);
-
-			dma_start(config->dma_dev, config->dma_channel_rx);
-
-			/* Request a new buffer */
-			if (data->async_callback) {
-				evt.type = UART_RX_BUF_REQUEST;
-
-				data->async_callback(dev, &evt, data->async_user_data);
+			if (data->rx_len != 0) {
+				UARTEnableDMA(config->reg, UART_DMA_RX);
 			}
 		}
 
@@ -998,7 +1074,6 @@ static int uart_lpf3_init_common(const struct device *dev)
 	UARTEnableInt(config->reg, UART_INT_TXDMADONE | UART_INT_RXDMADONE);
 
 	k_work_init_delayable(&data->tx_timeout_work, uart_lpf3_async_tx_timeout);
-	k_work_init_delayable(&data->rx_timeout_work, uart_lpf3_async_rx_timeout);
 
 	data->dev = dev;
 #endif
