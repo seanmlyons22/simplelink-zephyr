@@ -1,0 +1,31 @@
+/*
+ * Copyright (c) 2026 Texas Instruments Incorporated
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * lp_em_cc2745r10_q1 (CC27xx): uart0 as dut (loopback jumper DIO1 -> DIO2),
+ * console freed to SEGGER RTT (injected rtt.conf). counter_dev -> lgpt0 (free;
+ * the board uses lgpt2/lgpt3 for PWM). The LGPT counter driver
+ * (ti,cc27xx-lgpt) supplies the test's timing loop.
+ */
+
+/ {
+	chosen {
+		/delete-property/ zephyr,console;
+		/delete-property/ zephyr,shell-uart;
+	};
+};
+
+dut: &uart0 {
+	status = "okay";
+	current-speed = <115200>;
+};
+
+counter_dev: &lgpt0 {
+	/*
+	 * Prescale the ~96 MHz M33 clock so the test's 1000 us top value fits the
+	 * 16-bit LGPT (max-top-value 0xffff): 96 MHz / 33 ~= 2.9 MHz -> ~2900
+	 * ticks. Without this the default prescale 0 overflows the top register.
+	 */
+	clk-prescale = <32>;
+	status = "okay";
+};
