@@ -1,0 +1,10 @@
+tests:
+  drivers.counter.cc23x0_alarm:
+    tags:
+      - drivers
+      - counter
+    platform_allow:
+      - lp_em_cc2340r5
+      - lp_em_cc2340r53
+      - lp_em_cc2340r53_wcsp
+      - lp_em_cc2340r5moda

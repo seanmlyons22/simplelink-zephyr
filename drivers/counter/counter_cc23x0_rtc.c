@@ -100,7 +100,12 @@ static int counter_cc23x0_set_alarm(const struct device *dev, uint8_t chan_id,
 	HWREG(config->base + RTC_O_IMASK) = 0x1;
 	HWREG(config->base + RTC_O_ARMSET) = 0x1;
 
-	HWREG(EVTSVT_BASE + EVTSVT_O_CPUIRQ3SEL) = EVTSVT_CPUIRQ16SEL_PUBID_AON_RTC_COMB;
+	/* Mux the RTC combined event to the CPU interrupt line assigned to this
+	 * instance in the devicetree. CPUIRQ3 must not be used here: the TI
+	 * Power driver dedicates it to the CKM oscillator interrupt.
+	 */
+	HWREG(EVTSVT_BASE + EVTSVT_O_CPUIRQ0SEL + sizeof(uint32_t) * DT_INST_IRQN(0)) =
+		EVTSVT_CPUIRQ0SEL_PUBID_AON_RTC_COMB;
 
 	IRQ_CONNECT(DT_INST_IRQN(0),
 		    DT_INST_IRQ(0, priority),
@@ -123,7 +128,7 @@ static int counter_cc23x0_cancel_alarm(const struct device *dev, uint8_t chan_id
 	const struct counter_cc23x0_config *config = dev->config;
 
 	/* Unset interrupt source */
-	HWREG(EVTSVT_BASE + EVTSVT_O_CPUIRQ3SEL) = 0x0;
+	HWREG(EVTSVT_BASE + EVTSVT_O_CPUIRQ0SEL + sizeof(uint32_t) * DT_INST_IRQN(0)) = 0x0;
 
 	/* Unarm both channels */
 	HWREG(config->base + RTC_O_ARMCLR) = 0x3;
