@@ -37,11 +37,14 @@ ZTEST(lpf3_tick_timing, test_one_tick_sleep_duration)
 	TC_PRINT("%d one-tick sleeps took %u cycles (%u per tick)\n",
 		 LOOPS, elapsed, cycles_per_tick);
 
-	/* Each 1-tick sleep must complete on the next tick boundary. Allow
-	 * 50% margin for ISR/scheduling overhead; the unaligned-baseline bug
-	 * doubles the duration (~200%), well past this threshold.
+	/* A K_TICKS(1) sleep wakes on the next tick boundary after >= 1 full
+	 * tick, so with correct tickless behavior it averages ~1.5 ticks
+	 * (measured ~150 ticks / 100 sleeps on HW). The unaligned-baseline
+	 * bug pushed this to ~2.0 ticks (~200). Put the ceiling at 1.75x:
+	 * clears the correct ~1.5x result with margin, still catches the
+	 * 2.0x regression.
 	 */
-	zassert_true(elapsed < (LOOPS * 3U / 2U) * cycles_per_tick,
+	zassert_true(elapsed < (LOOPS * 7U / 4U) * cycles_per_tick,
 		     "1-tick sleeps too slow: %u cycles for %d sleeps",
 		     elapsed, LOOPS);
 	zassert_true(elapsed >= (LOOPS - 1U) * cycles_per_tick,
