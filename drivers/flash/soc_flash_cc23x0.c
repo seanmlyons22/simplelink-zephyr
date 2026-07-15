@@ -56,6 +56,15 @@ static int flash_cc23x0_erase(const struct device *dev, off_t offs, size_t size)
 		return -EINVAL;
 	}
 
+	/*
+	 * Constrain the erase range to main flash. Without this check an
+	 * out-of-range offset reaches HapiFlashSectorErase(), which also
+	 * accepts the CCFG sector (0x4E020000) and would erase it.
+	 */
+	if (offs < 0 || (size_t)offs >= FLASH_SIZE || size > FLASH_SIZE - (size_t)offs) {
+		return -EINVAL;
+	}
+
 	if (k_sem_take(&data->mutex, K_FOREVER)) {
 		return -EACCES;
 	}
@@ -95,11 +104,8 @@ static int flash_cc23x0_write(const struct device *dev, off_t offs, const void *
 		return 0;
 	}
 
-	if (offs < 0 || size < 1) {
-		return -EINVAL;
-	}
-
-	if (offs + size > FLASH_SIZE) {
+	/* Overflow-safe range check */
+	if (offs < 0 || (size_t)offs >= FLASH_SIZE || size > FLASH_SIZE - (size_t)offs) {
 		return -EINVAL;
 	}
 
@@ -138,11 +144,8 @@ static int flash_cc23x0_read(const struct device *dev, off_t offs, void *data, s
 		return 0;
 	}
 
-	if (offs < 0 || size < 1) {
-		return -EINVAL;
-	}
-
-	if (offs + size > FLASH_SIZE) {
+	/* Overflow-safe range check */
+	if (offs < 0 || (size_t)offs >= FLASH_SIZE || size > FLASH_SIZE - (size_t)offs) {
 		return -EINVAL;
 	}
 

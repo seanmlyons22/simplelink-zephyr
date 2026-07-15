@@ -1,0 +1,10 @@
+common:
+  tags:
+    - drivers
+    - flash
+tests:
+  drivers.flash.ti_lpf3:
+    platform_allow:
+      - lp_em_cc2340r5
+      - lp_em_cc2340r53
+      - lp_em_cc2745r10_q1/cc2745r10_q1
