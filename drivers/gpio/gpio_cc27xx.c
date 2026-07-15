@@ -207,15 +207,17 @@ static int gpio_cc27xxxx_pin_interrupt_configure(const struct device *port, gpio
 		return -ENOTSUP;
 	}
 
-	uint32_t config = IOCGetConfig(pin) & ~IOC_IOC0_EDGEDET_M;
+	/* RMW the raw IOCn register: IOCGetConfig() strips PORTCFG, so writing
+	 * its result back with IOCSetConfigAndMux() would force the pinmux to
+	 * GPIO. The mux is owned by pinctrl and must be preserved here.
+	 */
+	uint32_t config = HWREG(IOC_ADDR(pin)) & ~(IOC_IOC0_EDGEDET_M | IOC_IOC0_WUENSB_M);
 
 	if (mode == GPIO_INT_MODE_DISABLED) {
-		config |= IOC_IOC0_EDGEDET_EDGE_DIS;
-
-		IOCSetConfigAndMux(pin, config, IOC_MUX_GPIO);
-
 		/* Disable interrupt mask */
 		GPIODisableEventDio(pin);
+
+		HWREG(IOC_ADDR(pin)) = config | IOC_IOC0_EDGEDET_EDGE_DIS;
 
 	} else if (mode == GPIO_INT_MODE_EDGE) {
 		/* WUENSB (standby wake) is always armed for edge interrupts below,
@@ -238,7 +240,12 @@ static int gpio_cc27xxxx_pin_interrupt_configure(const struct device *port, gpio
 		/* Allow interrupts to trigger in standby */
 		config |= IOC_IOC0_WUENSB;
 
-		IOCSetConfigAndMux(pin, config, IOC_MUX_GPIO);
+		/* Mask events while changing EDGEDET so spurious edges are not
+		 * dispatched, then clear pending flags and re-enable (TRM 22.3).
+		 */
+		GPIODisableEventDio(pin);
+
+		HWREG(IOC_ADDR(pin)) = config;
 
 		/* Enable interrupt mask */
 		GPIOClearEventDio(pin);

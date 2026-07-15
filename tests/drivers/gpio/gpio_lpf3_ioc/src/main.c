@@ -90,4 +90,27 @@ ZTEST(gpio_lpf3_ioc, test_pin_configure_preserves_int_trigger)
 		      "interrupt trigger lost after gpio_pin_configure()");
 }
 
+/*
+ * pin_interrupt_configure() must not touch PORTCFG: the API is documented for
+ * pins routed to other modules (I2C/SPI/UART) and the pinmux is owned by
+ * pinctrl. Plant a non-GPIO mux value and check it survives.
+ */
+ZTEST(gpio_lpf3_ioc, test_int_configure_preserves_portcfg)
+{
+	uint32_t saved = IOC_REG(in.pin);
+
+	IOC_REG(in.pin) = (saved & ~IOC_IOC0_PORTCFG_M) | IOC_IOC0_PORTCFG_ANA;
+
+	zassert_ok(gpio_pin_interrupt_configure_dt(&in, GPIO_INT_EDGE_RISING));
+
+	uint32_t portcfg = IOC_REG(in.pin) & IOC_IOC0_PORTCFG_M;
+
+	/* Restore before asserting so a failure doesn't leave the pin on ANA */
+	zassert_ok(gpio_pin_interrupt_configure_dt(&in, GPIO_INT_DISABLE));
+	IOC_REG(in.pin) = saved;
+
+	zassert_equal(portcfg, IOC_IOC0_PORTCFG_ANA,
+		      "pin_interrupt_configure rewrote PORTCFG (pinmux)");
+}
+
 ZTEST_SUITE(gpio_lpf3_ioc, NULL, suite_setup, test_before, test_after, NULL);
