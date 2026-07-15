@@ -638,6 +638,16 @@ static int uart_lpf3_async_rx_enable(const struct device *dev, uint8_t *buf, siz
 	/* Disable DMA trigger */
 	UARTDisableDMA(config->reg, UART_DMA_RX);
 
+	/*
+	 * Start clean: drop any residue left in the RX FIFO by a previous
+	 * session (e.g. an aborted read) and clear latched errors, so the new
+	 * transfer is not shifted by stale bytes.
+	 */
+	while (UARTCharAvailable(config->reg)) {
+		(void)UARTGetCharNonBlocking(config->reg);
+	}
+	UARTClearRxError(config->reg);
+
 	/* Start DMA channel */
 	ret = dma_start(config->dma_dev, config->dma_channel_rx);
 	if (ret) {
@@ -842,19 +852,26 @@ static void uart_lpf3_rx_buf_complete(const struct device *dev)
 		data->rx_next_len = 0;
 		data->rx_processed_len = 0;
 
+		/*
+		 * Gate the UART DMA requests across the swap. The uDMA clears
+		 * USEBURST on transfer completion, so it must be re-applied
+		 * BEFORE the channel is enabled: otherwise, with RXDMAE still
+		 * set and FIFO stragglers present, the channel services single
+		 * requests for the few instructions until USEBURST is written --
+		 * re-opening the UDMA_01 torn/duplicated-read window at every
+		 * buffer boundary.
+		 */
+		UARTDisableDMA(config->reg, UART_DMA_RX);
+
 		dma_reload(config->dma_dev, config->dma_channel_rx,
 			   (uint32_t)UART_LPF3_REG_GET(config->reg, UART_O_DR),
 			   (uint32_t)data->rx_buf, data->rx_len);
 
+		uDMAEnableChannelAttribute(BIT(config->dma_channel_rx), UDMA_ATTR_USEBURST);
+
 		dma_start(config->dma_dev, config->dma_channel_rx);
 
-		/*
-		 * The uDMA clears USEBURST when a transfer completes, so the
-		 * next buffer would fall back to single requests (FIFO drained
-		 * empty -> UDMA_01 torn reads return, and the RX-timeout never
-		 * fires for a partial buffer). Re-apply it for every buffer.
-		 */
-		uDMAEnableChannelAttribute(BIT(config->dma_channel_rx), UDMA_ATTR_USEBURST);
+		UARTEnableDMA(config->reg, UART_DMA_RX);
 
 		/* Request a new buffer */
 		if (data->async_callback) {
@@ -991,13 +1008,19 @@ static void uart_lpf3_isr(const struct device *dev)
 							   config->reg, UART_O_DR),
 						   (uint32_t)&data->rx_buf[pos],
 						   data->rx_len - pos);
-					dma_start(config->dma_dev,
-						  config->dma_channel_rx);
 
-					/* uDMA clears USEBURST on completion */
+					/*
+					 * Re-apply USEBURST (cleared by the uDMA
+					 * on completion) BEFORE enabling the
+					 * channel, so no single request is ever
+					 * serviced (UDMA_01). RXDMAE is already
+					 * gated off above and re-enabled below.
+					 */
 					uDMAEnableChannelAttribute(
 						BIT(config->dma_channel_rx),
 						UDMA_ATTR_USEBURST);
+					dma_start(config->dma_dev,
+						  config->dma_channel_rx);
 				}
 			}
 
