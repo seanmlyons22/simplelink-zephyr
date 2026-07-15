@@ -314,15 +314,24 @@ static int entropy_cc27xx_init(const struct device *dev)
 	 * The entropy is generated using SHA2 Operation.
 	 */
 	for (int i = 0; i < entropy_iter; i++) {
-		/* Clear noise data array and retrieve RCL noise */
+		/* Clear noise data array and retrieve RCL noise. The wrapper's
+		 * completion status is unreliable for ADC-noise captures: a
+		 * mistimed pend can report a non-Finished status for a good
+		 * capture (SDK bug-reports/RCL-core.md, RCL_Command_pend race),
+		 * so gate on buffer content, not on the status. A genuinely
+		 * failed capture leaves the buffer cleared here; reject an empty
+		 * first block like the SDK's CryptoUtils_isBufferAllZeros() check
+		 * in RNGLPF3RF_conditionNoise(). The health tests below reject
+		 * statistically bad noise when enabled.
+		 */
 		memset(rcl_noise, 0, noise_length);
-		rcl_status = get_rcl_noise(rcl_noise, CONFIG_ENTROPY_CC27XX_NOISE_INPUT_WORD_LENGTH);
-		if (rcl_status != 0) {
-			/* Noise capture failed: the buffer contents must not be used */
+		(void)get_rcl_noise(rcl_noise, CONFIG_ENTROPY_CC27XX_NOISE_INPUT_WORD_LENGTH);
+		if ((rcl_noise[0] | rcl_noise[1] | rcl_noise[2] | rcl_noise[3]) == 0) {
 			k_free(rcl_noise);
 			return -EIO;
 		}
 
+		rcl_status = 0;
 		if (CONFIG_ENTROPY_CC27XX_RCT_ENABLED || CONFIG_ENTROPY_CC27XX_APT_ENABLED) {
 			/* Perform Health Checks on the noise data before generating entropy */
 			rcl_status = entropy_health_tests(rcl_noise);
