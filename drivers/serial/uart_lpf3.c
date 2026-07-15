@@ -554,6 +554,14 @@ static int uart_lpf3_async_tx(const struct device *dev, const uint8_t *buf, size
 	/* Lock PM */
 	uart_lpf3_pm_policy_state_lock_get(data, UART_LPF3_PM_LOCK_TX);
 
+	/*
+	 * Clear any latched EOT so RIS.EOT reflects only THIS transfer. The ISR
+	 * completes the transfer (fires TX_DONE) on EOT -- once the TX FIFO + line
+	 * have fully drained -- so a chained 2nd uart_tx re-arms on an empty FIFO
+	 * (see the TXDMADONE handler; serial-3 UDMA_01 chained-TX corruption).
+	 */
+	UARTClearInt(config->reg, UART_INT_EOT);
+
 	/* Enable DMA trigger to start the transfer */
 	UARTEnableDMA(config->reg, UART_DMA_TX);
 
@@ -597,6 +605,13 @@ static int uart_lpf3_tx_halt(struct uart_lpf3_data *data)
 	 */
 	UARTDisableDMA(config->reg, UART_DMA_TX);
 	UARTClearInt(config->reg, UART_INT_TXDMADONE);
+
+	/*
+	 * Also mask+clear EOT: a transfer waiting for its EOT completion
+	 * (TXDMADONE seen, drain pending) must not fire TX_DONE after this abort.
+	 */
+	UARTDisableInt(config->reg, UART_INT_EOT);
+	UARTClearInt(config->reg, UART_INT_EOT);
 
 	if (dma_get_status(config->dma_dev, config->dma_channel_tx, &status) == 0) {
 		evt.data.tx.len = total_len - status.pending_length;
@@ -967,7 +982,26 @@ static void uart_lpf3_isr(const struct device *dev)
 	 * It is not signaled on the DMA dedicated interrupt.
 	 */
 	if (int_status & UART_INT_TXDMADONE) {
+		/*
+		 * DMA has finished filling the TX FIFO, but bytes may still be in
+		 * the FIFO/shift register. Defer TX_DONE to the EOT interrupt, which
+		 * fires once the TX FIFO AND the TX line are fully drained (TRM 19.6
+		 * RIS.EOT). This makes TX_DONE mean "transmitted" and, crucially,
+		 * guarantees a 2nd uart_tx() chained from the callback re-arms the DMA
+		 * on an EMPTY TX FIFO. Re-arming into the 1st transfer's still-full
+		 * FIFO at high baud hits the UDMA_01 dropped-write window and garbles
+		 * the 2nd buffer (serial-3). RIS.EOT was cleared in uart_lpf3_async_tx,
+		 * so unmasking it now fires exactly once for this transfer -- either
+		 * on a later ISR entry once drain completes, or right away if the
+		 * short transfer already drained.
+		 */
 		UARTClearInt(config->reg, UART_INT_TXDMADONE);
+		UARTEnableInt(config->reg, UART_INT_EOT);
+	}
+
+	if (int_status & UART_INT_EOT) {
+		UARTDisableInt(config->reg, UART_INT_EOT);
+		UARTClearInt(config->reg, UART_INT_EOT);
 
 		k_work_cancel_delayable(&data->tx_timeout_work);
 
