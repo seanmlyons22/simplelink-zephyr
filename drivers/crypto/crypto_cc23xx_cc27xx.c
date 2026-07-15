@@ -183,7 +183,8 @@ static int crypto_cc23xx_cc27xx_ecb_encrypt(struct cipher_ctx *ctx, struct ciphe
 	uint32_t int_flags = AES_IMASK_CHBDONE;
 	const struct crypto_cc23xx_cc27xx_config *cfg = dev->config;
 	bool dma_enabled = false;
-	uint32_t data_size = crypto_cc23xx_cc27xx_get_dma_data_size(pkt->in_buf);
+	uint32_t data_size_in = crypto_cc23xx_cc27xx_get_dma_data_size(pkt->in_buf);
+	uint32_t data_size_out = crypto_cc23xx_cc27xx_get_dma_data_size(pkt->out_buf);
 
 	struct dma_block_config block_cfg_cha = {
 		.source_address = (uint32_t)(pkt->in_buf),
@@ -198,8 +199,8 @@ static int crypto_cc23xx_cc27xx_ecb_encrypt(struct cipher_ctx *ctx, struct ciphe
 		.channel_direction = MEMORY_TO_PERIPHERAL,
 		.block_count = 1,
 		.head_block = &block_cfg_cha,
-		.source_data_size = data_size,
-		.dest_data_size = data_size,
+		.source_data_size = data_size_in,
+		.dest_data_size = data_size_in,
 		.source_burst_length = AES_BLOCK_SIZE,
 		.dest_burst_length = AES_BLOCK_SIZE,
 		.dma_callback = NULL,
@@ -219,8 +220,8 @@ static int crypto_cc23xx_cc27xx_ecb_encrypt(struct cipher_ctx *ctx, struct ciphe
 		.channel_direction = PERIPHERAL_TO_MEMORY,
 		.block_count = 1,
 		.head_block = &block_cfg_chb,
-		.source_data_size = data_size,
-		.dest_data_size = data_size,
+		.source_data_size = data_size_out,
+		.dest_data_size = data_size_out,
 		.source_burst_length = AES_BLOCK_SIZE,
 		.dest_burst_length = AES_BLOCK_SIZE,
 		.dma_callback = NULL,
@@ -366,8 +367,8 @@ static int crypto_cc23xx_cc27xx_ctr(struct cipher_ctx *ctx, struct cipher_pkt *p
 	const struct crypto_cc23xx_cc27xx_config *cfg = dev->config;
 	int dma_len = ROUND_DOWN(pkt->in_len, AES_BLOCK_SIZE);
 	bool dma_enabled = false;
-	uint32_t data_size = crypto_cc23xx_cc27xx_get_dma_data_size(pkt->in_buf);
-
+	uint32_t data_size_in = crypto_cc23xx_cc27xx_get_dma_data_size(pkt->in_buf);
+	uint32_t data_size_out = crypto_cc23xx_cc27xx_get_dma_data_size(pkt->out_buf);
 
 	struct dma_block_config block_cfg_cha = {
 		.source_address = (uint32_t)(pkt->in_buf),
@@ -382,8 +383,8 @@ static int crypto_cc23xx_cc27xx_ctr(struct cipher_ctx *ctx, struct cipher_pkt *p
 		.channel_direction = MEMORY_TO_PERIPHERAL,
 		.block_count = 1,
 		.head_block = &block_cfg_cha,
-		.source_data_size = data_size,
-		.dest_data_size = data_size,
+		.source_data_size = data_size_in,
+		.dest_data_size = data_size_in,
 		.source_burst_length = AES_BLOCK_SIZE,
 		.dest_burst_length = AES_BLOCK_SIZE,
 		.dma_callback = NULL,
@@ -403,8 +404,8 @@ static int crypto_cc23xx_cc27xx_ctr(struct cipher_ctx *ctx, struct cipher_pkt *p
 		.channel_direction = PERIPHERAL_TO_MEMORY,
 		.block_count = 1,
 		.head_block = &block_cfg_chb,
-		.source_data_size = data_size,
-		.dest_data_size = data_size,
+		.source_data_size = data_size_out,
+		.dest_data_size = data_size_out,
 		.source_burst_length = AES_BLOCK_SIZE,
 		.dest_burst_length = AES_BLOCK_SIZE,
 		.dma_callback = NULL,
@@ -573,7 +574,10 @@ static int crypto_cc23xx_cc27xx_cmac(struct cipher_ctx *ctx, struct cipher_pkt *
 	const struct crypto_cc23xx_cc27xx_config *cfg = dev->config;
 	int dma_len = ROUND_DOWN(pkt->in_len, AES_BLOCK_SIZE);
 	bool dma_enabled = false;
-	uint32_t data_size = crypto_cc23xx_cc27xx_get_dma_data_size(pkt->in_buf);
+	/* Channel A serves several source buffers (b0, b1, data); the DMA
+	 * data size is set per transfer from that buffer's alignment.
+	 */
+	uint32_t data_size = crypto_cc23xx_cc27xx_get_dma_data_size(b0);
 
 	struct dma_block_config block_cfg_cha = {
 		.source_address = (uint32_t)b0,
@@ -668,6 +672,9 @@ static int crypto_cc23xx_cc27xx_cmac(struct cipher_ctx *ctx, struct cipher_pkt *
 	if (b1) {
 #ifdef CONFIG_CRYPTO_CC23XX_CC27XX_DMA
 		block_cfg_cha.source_address = (uint32_t)b1;
+		data_size = crypto_cc23xx_cc27xx_get_dma_data_size(b1);
+		dma_cfg_cha.source_data_size = data_size;
+		dma_cfg_cha.dest_data_size = data_size;
 
 		ret = dma_config(cfg->dma_dev, cfg->dma_channel_a, &dma_cfg_cha);
 		if (ret) {
@@ -702,6 +709,9 @@ static int crypto_cc23xx_cc27xx_cmac(struct cipher_ctx *ctx, struct cipher_pkt *
 	if (dma_len > 0) {
 		block_cfg_cha.source_address = (uint32_t)(pkt->in_buf);
 		block_cfg_cha.block_size = dma_len;
+		data_size = crypto_cc23xx_cc27xx_get_dma_data_size(pkt->in_buf);
+		dma_cfg_cha.source_data_size = data_size;
+		dma_cfg_cha.dest_data_size = data_size;
 
 		ret = dma_config(cfg->dma_dev, cfg->dma_channel_a, &dma_cfg_cha);
 		if (ret) {

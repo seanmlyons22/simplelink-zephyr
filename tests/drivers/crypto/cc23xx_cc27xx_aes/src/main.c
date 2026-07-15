@@ -236,6 +236,45 @@ ZTEST(crypto_lpf3_aes, test_ecb_multi_block_kat)
 			  "ECB multi block mismatch");
 }
 
+/*
+ * The AES input/output DMA channels are independent: each channel's
+ * transfer width must be derived from the alignment of the buffer that
+ * channel actually accesses (TRM 15.3.7 requires data aligned to the
+ * DMA data size). Regression test for the output buffer being less
+ * aligned than the input buffer.
+ */
+ZTEST(crypto_lpf3_aes, test_ecb_unaligned_out)
+{
+	static uint8_t out_raw[32 + 8];
+	uint8_t *out = &out_raw[1];
+
+	memset(out_raw, 0xa5, sizeof(out_raw));
+
+	zassert_ok(ecb_encrypt((uint8_t *)kat_plaintext, 32, out, 32),
+		   "ECB encrypt failed");
+	zassert_mem_equal(out, ecb_ciphertext, 32, "ECB unaligned-out mismatch");
+	zassert_equal(out_raw[0], 0xa5, "byte before out_buf clobbered");
+	for (size_t i = 1 + 32; i < sizeof(out_raw); i++) {
+		zassert_equal(out_raw[i], 0xa5, "byte after out_buf clobbered");
+	}
+}
+
+ZTEST(crypto_lpf3_aes, test_ctr_unaligned_out)
+{
+	static uint8_t out_raw[32 + 8];
+	uint8_t *out = &out_raw[1];
+
+	memset(out_raw, 0xa5, sizeof(out_raw));
+
+	zassert_ok(ctr_op(CRYPTO_CIPHER_OP_ENCRYPT, (uint8_t *)kat_plaintext, 32, out, 32),
+		   "CTR encrypt failed");
+	zassert_mem_equal(out, ctr_ciphertext, 32, "CTR unaligned-out mismatch");
+	zassert_equal(out_raw[0], 0xa5, "byte before out_buf clobbered");
+	for (size_t i = 1 + 32; i < sizeof(out_raw); i++) {
+		zassert_equal(out_raw[i], 0xa5, "byte after out_buf clobbered");
+	}
+}
+
 ZTEST(crypto_lpf3_aes, test_ctr_kat)
 {
 	uint8_t out[64] = {0};
