@@ -1,0 +1,9 @@
+/*
+ * Copyright (c) 2026 Texas Instruments Incorporated
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * LGPT3 (24-bit) is already enabled in the board devicetree for the PWM LEDs;
+ * the counter driver attaches to the same node. There is no counter-capable
+ * RTC binding on CC27xx, so only the LGPT suite runs on this board.
+ */

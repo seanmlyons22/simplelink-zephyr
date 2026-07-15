@@ -21,6 +21,23 @@
 
 LOG_MODULE_REGISTER(cc23x0_counter_rtc, CONFIG_COUNTER_LOG_LEVEL);
 
+/*
+ * The RTC counter value exposed by this driver is the TIME8U register,
+ * i.e. bits [34:3] of the 67-bit RTC counter, with a resolution of 8 us
+ * per tick (TRM chapter 12, "RTC"). Hence the counter frequency seen
+ * through the Zephyr counter API is 125 kHz.
+ */
+#define RTC_CC23X0_FREQ_HZ 125000U
+
+/*
+ * The RTC event must be routed to the CPU interrupt line this driver is
+ * connected to (from devicetree). CPUIRQnSEL registers are contiguous,
+ * 4 bytes apart, starting at CPUIRQ0SEL (TRM table 4-18), and all reset
+ * to 0 (no publisher selected).
+ */
+#define RTC_CC23X0_CPUIRQ_SEL_REG                                                                  \
+	(EVTSVT_BASE + EVTSVT_O_CPUIRQ0SEL + sizeof(uint32_t) * DT_INST_IRQN(0))
+
 static void counter_cc23x0_isr(const struct device *dev);
 
 struct counter_cc23x0_config {
@@ -53,13 +70,23 @@ static int counter_cc23x0_get_value_64(const struct device *dev, uint64_t *ticks
 	 * They are split in two partially overlapping registers:
 	 * TIME524M [50:19]
 	 * TIME8U   [34:3]
+	 *
+	 * The values must be widened to 64 bits before shifting, otherwise
+	 * the TIME524M contribution (bits [50:35] of the counter) and the
+	 * top 3 bits of TIME8U are shifted out of a 32-bit intermediate.
+	 * TIME8U is read between the two TIME524M reads to detect a carry
+	 * into TIME524M and retry, so both reads belong to the same instant.
 	 */
+	uint32_t time524m = HWREG(config->base + RTC_O_TIME524M);
+	uint32_t time8u = HWREG(config->base + RTC_O_TIME8U);
 
-	uint64_t rtc_time_now = ((HWREG(config->base + RTC_O_TIME524M) << 19)
-				 & 0xFFFFFFF800000000) |
-				 (HWREG(config->base + RTC_O_TIME8U) << 3);
+	if (HWREG(config->base + RTC_O_TIME524M) != time524m) {
+		time524m = HWREG(config->base + RTC_O_TIME524M);
+		time8u = HWREG(config->base + RTC_O_TIME8U);
+	}
 
-	*ticks = rtc_time_now;
+	*ticks = (((uint64_t)time524m << 19) & 0xFFFFFFF800000000ULL) |
+		 ((uint64_t)time8u << 3);
 
 	return 0;
 }
@@ -69,14 +96,16 @@ static void counter_cc23x0_isr(const struct device *dev)
 	const struct counter_cc23x0_config *config = dev->config;
 	struct counter_cc23x0_data *data = dev->data;
 
-	/* Clear RTC interrupt regs */
-	HWREG(config->base + RTC_O_ICLR) = 0x3;
-	HWREG(config->base + RTC_O_IMCLR) = 0x3;
+	/* Clear and mask channel 0 interrupt (alarms are one-shot) */
+	HWREG(config->base + RTC_O_ICLR) = 0x1;
+	HWREG(config->base + RTC_O_IMCLR) = 0x1;
 
 	uint32_t now = HWREG(config->base + RTC_O_TIME8U);
+	counter_alarm_callback_t cb = data->alarm_cfg0.callback;
 
-	if (data->alarm_cfg0.callback) {
-		data->alarm_cfg0.callback(dev, 0, now, data->alarm_cfg0.user_data);
+	if (cb) {
+		data->alarm_cfg0.callback = NULL;
+		cb(dev, 0, now, data->alarm_cfg0.user_data);
 	}
 }
 
@@ -85,35 +114,41 @@ static int counter_cc23x0_set_alarm(const struct device *dev, uint8_t chan_id,
 {
 	const struct counter_cc23x0_config *config = dev->config;
 	struct counter_cc23x0_data *data = dev->data;
+	uint32_t next_alarm;
 
-	/* RTC have resolutiuon of 8us */
-	if (counter_ticks_to_us(dev, alarm_cfg->ticks) <= 8) {
+	if (chan_id >= config->counter_info.channels) {
 		return -ENOTSUP;
 	}
 
-	uint32_t now = HWREG(config->base + RTC_O_TIME8U);
+	if (!alarm_cfg->ticks) {
+		return -EINVAL;
+	}
 
-	/* Calculate next alarm relative to current time in us */
-	uint32_t next_alarm = now + (counter_ticks_to_us(dev, alarm_cfg->ticks) / 8);
+	/*
+	 * Ticks are in units of the exposed counter value (TIME8U, 8 us per
+	 * tick), so they can be written to the CH0 compare register as is.
+	 */
+	if (alarm_cfg->flags & COUNTER_ALARM_CFG_ABSOLUTE) {
+		next_alarm = alarm_cfg->ticks;
+	} else {
+		next_alarm = HWREG(config->base + RTC_O_TIME8U) + alarm_cfg->ticks;
+	}
+
+	data->alarm_cfg0.flags = alarm_cfg->flags;
+	data->alarm_cfg0.ticks = alarm_cfg->ticks;
+	data->alarm_cfg0.callback = alarm_cfg->callback;
+	data->alarm_cfg0.user_data = alarm_cfg->user_data;
 
 	HWREG(config->base + RTC_O_CH0CC8U) = next_alarm;
 	HWREG(config->base + RTC_O_IMASK) = 0x1;
 	HWREG(config->base + RTC_O_ARMSET) = 0x1;
 
-	HWREG(EVTSVT_BASE + EVTSVT_O_CPUIRQ3SEL) = EVTSVT_CPUIRQ16SEL_PUBID_AON_RTC_COMB;
-
-	IRQ_CONNECT(DT_INST_IRQN(0),
-		    DT_INST_IRQ(0, priority),
-		    counter_cc23x0_isr,
-		    DEVICE_DT_INST_GET(0),
-		    0);
-
-	irq_enable(DT_INST_IRQN(0));
-
-	data->alarm_cfg0.flags = 0;
-	data->alarm_cfg0.ticks = alarm_cfg->ticks;
-	data->alarm_cfg0.callback = alarm_cfg->callback;
-	data->alarm_cfg0.user_data = alarm_cfg->user_data;
+	/*
+	 * Route the RTC event to the CPU interrupt line used by this driver.
+	 * The DT interrupt number matches the CPUIRQn line (CPUIRQ1 for the
+	 * default DT), whose select register resets to 0 (no source).
+	 */
+	HWREG(RTC_CC23X0_CPUIRQ_SEL_REG) = EVTSVT_CPUIRQ0SEL_PUBID_AON_RTC_COMB;
 
 	return 0;
 }
@@ -121,12 +156,19 @@ static int counter_cc23x0_set_alarm(const struct device *dev, uint8_t chan_id,
 static int counter_cc23x0_cancel_alarm(const struct device *dev, uint8_t chan_id)
 {
 	const struct counter_cc23x0_config *config = dev->config;
+	struct counter_cc23x0_data *data = dev->data;
+
+	if (chan_id >= config->counter_info.channels) {
+		return -ENOTSUP;
+	}
 
 	/* Unset interrupt source */
-	HWREG(EVTSVT_BASE + EVTSVT_O_CPUIRQ3SEL) = 0x0;
+	HWREG(RTC_CC23X0_CPUIRQ_SEL_REG) = 0x0;
 
-	/* Unarm both channels */
-	HWREG(config->base + RTC_O_ARMCLR) = 0x3;
+	/* Unarm channel 0 (channel 1 is not managed by this driver) */
+	HWREG(config->base + RTC_O_ARMCLR) = 0x1;
+
+	data->alarm_cfg0.callback = NULL;
 
 	return 0;
 }
@@ -140,35 +182,29 @@ static int counter_cc23x0_set_top_value(const struct device *dev,
 static uint32_t counter_cc23x0_get_pending_int(const struct device *dev)
 {
 	const struct counter_cc23x0_config *config = dev->config;
-	struct counter_cc23x0_data *data = dev->data;
 
 	/* Check interrupt and mask */
-	if (HWREG(config->base + RTC_O_RIS) & HWREG(config->base + RTC_O_MIS)) {
-		/* Clear RTC interrupt regs */
-		HWREG(config->base + RTC_O_ICLR) = 0x3;
-		HWREG(config->base + RTC_O_IMCLR) = 0x3;
-
-		uint32_t now = HWREG(config->base + RTC_O_TIME8U);
-
-		if (data->alarm_cfg0.callback) {
-			data->alarm_cfg0.callback(dev, 0, now, data->alarm_cfg0.user_data);
-		}
-
-		return 0;
-	}
-
-	return -ESRCH;
+	return (HWREG(config->base + RTC_O_RIS) & HWREG(config->base + RTC_O_MIS)) ? 1 : 0;
 }
 
 #ifdef CONFIG_PM_DEVICE
 
 static int rtc_cc23x0_pm_action(const struct device *dev, enum pm_device_action action)
 {
+	struct counter_cc23x0_data *data = dev->data;
+
 	switch (action) {
 	case PM_DEVICE_ACTION_SUSPEND:
 		return 0;
 	case PM_DEVICE_ACTION_RESUME:
-		counter_cc23x0_get_pending_int(dev);
+		/*
+		 * The RTC itself keeps running in standby, but the event
+		 * fabric routing is lost when the SVT domain powers down.
+		 * Restore it if an alarm is still armed.
+		 */
+		if (data->alarm_cfg0.callback) {
+			HWREG(RTC_CC23X0_CPUIRQ_SEL_REG) = EVTSVT_CPUIRQ0SEL_PUBID_AON_RTC_COMB;
+		}
 		return 0;
 	default:
 		return -ENOTSUP;
@@ -179,9 +215,10 @@ static int rtc_cc23x0_pm_action(const struct device *dev, enum pm_device_action 
 
 static uint32_t counter_cc23x0_get_top_value(const struct device *dev)
 {
-	ARG_UNUSED(dev);
+	const struct counter_cc23x0_config *config = dev->config;
 
-	return -ENOTSUP;
+	/* Free-running counter, top value is fixed */
+	return config->counter_info.max_top_value;
 }
 
 static uint32_t counter_cc23x0_get_freq(const struct device *dev)
@@ -189,13 +226,11 @@ static uint32_t counter_cc23x0_get_freq(const struct device *dev)
 	ARG_UNUSED(dev);
 
 	/*
-	 * From TRM clock for RTC is 24Mhz handled internally
-	 * which is 1/2 from main 48Mhz clock = 24Mhz
-	 * Accessible for user resolution is 8us per bit
-	 * TIME8U [34:3] ~ 9.5h
+	 * The counter value exposed by get_value() is TIME8U, which has a
+	 * resolution of 8 us per tick (TRM chapter 12), i.e. 125 kHz. This
+	 * must match the unit used for alarm ticks and get_value().
 	 */
-
-	return  (DT_PROP(DT_PATH(cpus, cpu_0), clock_frequency) / 2);
+	return RTC_CC23X0_FREQ_HZ;
 }
 
 static int counter_cc23x0_start(const struct device *dev)
@@ -228,6 +263,14 @@ static int counter_cc23x0_init(const struct device *dev)
 
 	/* Clear Armed */
 	HWREG(config->base + RTC_O_ARMCLR) = 0x3;
+
+	IRQ_CONNECT(DT_INST_IRQN(0),
+		    DT_INST_IRQ(0, priority),
+		    counter_cc23x0_isr,
+		    DEVICE_DT_INST_GET(0),
+		    0);
+
+	irq_enable(DT_INST_IRQN(0));
 
 	return 0;
 }

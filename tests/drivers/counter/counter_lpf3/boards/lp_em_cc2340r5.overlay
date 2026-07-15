@@ -1,0 +1,28 @@
+/*
+ * Copyright (c) 2026 Texas Instruments Incorporated
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Enable ONLY LGPT3 on purpose: with the LGPT0-2 nodes disabled, LGPT3 gets
+ * devicetree instance number 0. This is the regression setup for the clock
+ * gate selection bug (clk_idx derived from the DT instance number would
+ * enable CLKCTL_LGPT0 and leave LGPT3 unclocked).
+ *
+ * The RTC (rtc0) is already enabled in the board devicetree.
+ */
+
+&lgpt0 {
+	status = "disabled";
+};
+
+&lgpt1 {
+	status = "disabled";
+};
+
+&lgpt2 {
+	status = "disabled";
+};
+
+&lgpt3 {
+	status = "okay";
+};
