@@ -1,0 +1,14 @@
+common:
+  tags:
+    - drivers
+    - crypto
+  platform_allow:
+    - lp_em_cc2340r5
+    - lp_em_cc2745r10_q1/cc2745r10_q1
+tests:
+  drivers.crypto.cc23xx_cc27xx_aes.pio:
+    extra_configs:
+      - CONFIG_CRYPTO_CC23XX_CC27XX_DMA=n
+  drivers.crypto.cc23xx_cc27xx_aes.dma:
+    extra_configs:
+      - CONFIG_CRYPTO_CC23XX_CC27XX_DMA=y

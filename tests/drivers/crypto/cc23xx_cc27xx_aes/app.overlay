@@ -1,0 +1,8 @@
+/* Enable the AES accelerator (and its DMA controller) on LPF3 boards */
+&aes {
+	status = "okay";
+};
+
+&dma {
+	status = "okay";
+};
