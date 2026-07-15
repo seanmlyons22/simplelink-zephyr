@@ -31,23 +31,19 @@ static void cb_handler(const struct device *port, struct gpio_callback *cb, uint
 	atomic_inc(&cb_count);
 }
 
-static void *suite_setup(void)
-{
-	zassert_true(gpio_is_ready_dt(&out));
-	zassert_true(gpio_is_ready_dt(&in));
-
-	gpio_init_callback(&cb_data, cb_handler, BIT(in.pin));
-	zassert_ok(gpio_add_callback(in.port, &cb_data));
-
-	return NULL;
-}
-
 static void test_before(void *fixture)
 {
 	ARG_UNUSED(fixture);
 
+	zassert_true(gpio_is_ready_dt(&out));
+	zassert_true(gpio_is_ready_dt(&in));
+
 	zassert_ok(gpio_pin_configure_dt(&out, GPIO_OUTPUT_LOW));
 	zassert_ok(gpio_pin_configure_dt(&in, GPIO_INPUT));
+
+	/* gpio_manage_callback tolerates re-adding the same node */
+	gpio_init_callback(&cb_data, cb_handler, BIT(in.pin));
+	zassert_ok(gpio_add_callback(in.port, &cb_data));
 	atomic_set(&cb_count, 0);
 }
 
@@ -151,4 +147,4 @@ ZTEST(gpio_lpf3_ioc, test_port_pin_mask_matches_hw)
 		      "port_pin_mask allows pins beyond the device's DIOs");
 }
 
-ZTEST_SUITE(gpio_lpf3_ioc, NULL, suite_setup, test_before, test_after, NULL);
+ZTEST_SUITE(gpio_lpf3_ioc, NULL, NULL, test_before, test_after, NULL);
