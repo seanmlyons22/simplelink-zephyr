@@ -1,0 +1,11 @@
+# Copyright (c) 2026 Texas Instruments Incorporated
+# SPDX-License-Identifier: Apache-2.0
+
+tests:
+  drivers.watchdog.wdt_lpf3_long_timeout:
+    tags:
+      - drivers
+      - watchdog
+    platform_allow:
+      - lp_em_cc2340r5
+      - lp_em_cc2745r10_q1/cc2745r10_q1
