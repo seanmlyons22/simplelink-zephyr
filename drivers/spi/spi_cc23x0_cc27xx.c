@@ -766,14 +766,13 @@ static int spi_cc23x0_cc27xx_transceive(const struct device *dev, const struct s
 	 * transceive calls to ensure that the transfer is finished before
 	 * returning. This semaphore gets given in the ISR (using
 	 * spi_context_complete) when all data has been transferred/received.
+	 *
+	 * Use the return value, not ctx.sync_status: on timeout it returns
+	 * -ETIMEDOUT (sync_status would still hold the previous transfer's
+	 * value, masking the timeout as success), and in slave mode it returns
+	 * the number of received frames as the driver API promises.
 	 */
-	spi_context_wait_for_completion(&data->ctx);
-
-	/**
-	 * In slave mode, the status is actually the number of received frames. So
-	 * a non-zero positive value means success.
-	 */
-	ret = data->ctx.sync_status;
+	ret = spi_context_wait_for_completion(&data->ctx);
 
 	/*
 	 * Release the context lock only after the status has been consumed,
