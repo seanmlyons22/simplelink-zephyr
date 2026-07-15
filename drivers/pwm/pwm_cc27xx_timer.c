@@ -306,11 +306,12 @@ static int pwm_cc27xx_timer_get_cycles_per_sec(const struct device *dev, uint32_
 	struct pwm_cc27xx_timer_data *data = dev->data;
 
 	/*
-	 * On CC27XX, the LGPT reference clock is half of SVTCLK.
+	 * The LGPT prescaler tick source is the 48 MHz reference (CC27xx TRM,
+	 * LGPT chapter: tick rate = 48 MHz / (PRECFG.TICKDIV + 1)), which is
+	 * what the devicetree cpu clock-frequency property holds. Do not halve
+	 * it here: the counter_cc27xx_lgpt driver uses the same base value.
 	 */
-	uint32_t lgpt_base_clk = data->base_clk / 2;
-
-	*cycles = lgpt_base_clk / (data->prescale + 1);
+	*cycles = data->base_clk / (data->prescale + 1);
 
 	return 0;
 }
