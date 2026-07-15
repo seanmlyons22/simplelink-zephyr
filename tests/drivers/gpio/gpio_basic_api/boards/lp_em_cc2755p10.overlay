@@ -7,8 +7,13 @@
 / {
 	resources {
 		compatible = "test-gpio-basic-api";
-		/* Use DIO11 and DIO6 for GPIO loopback testing */
+		/*
+		 * Use DIO11 (BP.39) and DIO22 (BP.6) for GPIO loopback testing,
+		 * same pair as the LP_EM_CC2745R10_Q1 targets. DIO6 is not routed
+		 * to any header on this LaunchPad (SDK LP_EM_CC2755P10.syscfg.json
+		 * BoosterPack map), so it cannot be jumpered.
+		 */
 		out-gpios = <&gpio0 11 0>;  /* DIO11 */
-		in-gpios = <&gpio0 6 0>;  /* DIO6 */
+		in-gpios = <&gpio0 22 0>;  /* DIO22 */
 	};
 };
