@@ -553,11 +553,20 @@ static int uart_lpf3_tx_halt(struct uart_lpf3_data *data)
 
 	dma_stop(config->dma_dev, config->dma_channel_tx);
 
-	irq_unlock(key);
+	/*
+	 * Mask the TX DMA request and clear any latched TXDMADONE: a completion
+	 * that raced this abort must not fire into the next transfer. Compute the
+	 * aborted length while still locked so a new uart_tx() cannot race the
+	 * pending-count read.
+	 */
+	UARTDisableDMA(config->reg, UART_DMA_TX);
+	UARTClearInt(config->reg, UART_INT_TXDMADONE);
 
 	if (dma_get_status(config->dma_dev, config->dma_channel_tx, &status) == 0) {
 		evt.data.tx.len = total_len - status.pending_length;
 	}
+
+	irq_unlock(key);
 
 	if (total_len) {
 		if (data->async_callback) {
@@ -764,6 +773,14 @@ static int uart_lpf3_async_rx_disable(const struct device *dev)
 	UARTDisableInt(config->reg, UART_INT_RT);
 
 	dma_stop(config->dma_dev, config->dma_channel_rx);
+
+	/*
+	 * Mask the RX DMA request and clear any latched RXDMADONE/RT so a
+	 * completion that raced this disable cannot fire into a subsequently
+	 * re-enabled session (which would "complete" a brand-new empty buffer).
+	 */
+	UARTDisableDMA(config->reg, UART_DMA_RX);
+	UARTClearInt(config->reg, UART_INT_RXDMADONE | UART_INT_RT);
 
 	/* Unlock PM */
 	uart_lpf3_pm_policy_state_lock_put(data, UART_LPF3_PM_LOCK_RX);
