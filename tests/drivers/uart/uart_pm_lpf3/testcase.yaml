@@ -1,0 +1,14 @@
+common:
+  tags:
+    - drivers
+    - uart
+    - pm
+  depends_on: gpio
+  harness: ztest
+  harness_config:
+    fixture: gpio_loopback
+tests:
+  drivers.uart.pm_lpf3:
+    platform_allow:
+      - lp_em_cc2340r5
+      - lp_em_cc2745r10_q1/cc2745r10_q1
