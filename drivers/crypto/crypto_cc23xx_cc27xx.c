@@ -59,8 +59,6 @@ LOG_MODULE_REGISTER(crypto_cc23xx_cc27xx, CONFIG_CRYPTO_LOG_LEVEL);
 #define CRYPTO_CC23_CC27_OP_TIMEOUT_DMA(len)                                                       \
 	K_CYC(CRYPTO_CC23_CC27_BLK_PROC_TIMEOUT * ((len) / AES_BLOCK_SIZE))
 
-#define CRYPTO_CC23_CC27_IS_INVALID_DATA_LEN_DMA(len) (((len) % AES_BLOCK_SIZE) != 0)
-
 #define CRYPTO_CC23_CC27_REG_GET(offset) (AES_BASE + (offset))
 
 struct crypto_cc23xx_cc27xx_config {
@@ -232,12 +230,10 @@ static int crypto_cc23xx_cc27xx_ecb_encrypt(struct cipher_ctx *ctx, struct ciphe
 	int in_bytes_processed = 0;
 #endif
 
-#ifdef CONFIG_CRYPTO_CC23XX_CC27XX_DMA
-	if (CRYPTO_CC23_CC27_IS_INVALID_DATA_LEN_DMA(pkt->in_len)) {
-		LOG_ERR("In DMA mode, data length must be a multiple of %d", AES_BLOCK_SIZE);
+	if (!pkt->in_len || (pkt->in_len % AES_BLOCK_SIZE) != 0) {
+		LOG_ERR("Data length must be a non-zero multiple of %d", AES_BLOCK_SIZE);
 		return -EINVAL;
 	}
-#endif
 
 	if (pkt->out_buf_max < ROUND_UP(pkt->in_len, AES_BLOCK_SIZE)) {
 		LOG_ERR("Output buffer too small");

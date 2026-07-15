@@ -275,6 +275,28 @@ ZTEST(crypto_lpf3_aes, test_ctr_unaligned_out)
 	}
 }
 
+/*
+ * The LAES engine only does whole 16-byte blocks in ECB mode. A
+ * zero-length or non-block-multiple input must be rejected, not
+ * padded by over-reading in_buf / over-writing out_buf.
+ */
+ZTEST(crypto_lpf3_aes, test_ecb_invalid_len)
+{
+	static uint8_t in[20];
+	static uint8_t out_raw[32];
+
+	memset(out_raw, 0xa5, sizeof(out_raw));
+
+	zassert_not_equal(ecb_encrypt(in, 0, out_raw, sizeof(out_raw)), 0,
+			  "zero-length ECB input must be rejected");
+	for (size_t i = 0; i < sizeof(out_raw); i++) {
+		zassert_equal(out_raw[i], 0xa5, "out_buf written for zero-length input");
+	}
+
+	zassert_not_equal(ecb_encrypt(in, 20, out_raw, sizeof(out_raw)), 0,
+			  "non-block-multiple ECB input must be rejected");
+}
+
 ZTEST(crypto_lpf3_aes, test_ctr_kat)
 {
 	uint8_t out[64] = {0};
