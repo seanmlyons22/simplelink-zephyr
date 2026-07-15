@@ -9,14 +9,18 @@
 	boosterpack_header: connector {
 		compatible = "ti,boosterpack-header";
 		#gpio-cells = <2>;
+		/*
+		 * BP.5/BP.8 (DIO23/DIO24, 32 kHz crystal) and BP.27/28/29
+		 * (DIO18/DIO17/DIO19) are NC by default: their 0-ohm resistors
+		 * (R6/R7, R74/R75/R76) are not mounted (SDK
+		 * LP_EM_CC2755P10.syscfg.json), so they are not mapped here.
+		 */
 		gpio-map =  <2 0 &gpio0 21 0>,
 					<3 0 &gpio0 2  0>,
 					<4 0 &gpio0 1  0>,
-					<5 0 &gpio0 23 0>,
 					<6 0 &gpio0 22 0>,
 					<7 0 &gpio0 3  0>,
 
-					<8 0 &gpio0 24  0>,
 					<9 0 &gpio0 27  0>,
 					<10 0 &gpio0 28 0>,
 					<14 0 &gpio0 4  0>,
@@ -24,9 +28,6 @@
 					<18 0 &gpio0 7  0>,
 
 					<19 0 &gpio0 12 0>,
-					<27 0 &gpio0 18 0>,
-					<28 0 &gpio0 17 0>,
-					<29 0 &gpio0 19 0>,
 					<30 0 &gpio0 20 0>,
 					<31 0 &gpio0 18 0>,
 
