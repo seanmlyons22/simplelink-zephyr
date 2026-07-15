@@ -146,8 +146,24 @@ static int uart_lpf3_poll_in(const struct device *dev, unsigned char *c)
 static void uart_lpf3_poll_out(const struct device *dev, unsigned char c)
 {
 	const struct uart_lpf3_config *config = dev->config;
+	unsigned int key;
 
-	UARTPutChar(config->reg, c);
+	/*
+	 * Claim a TX FIFO slot atomically. UARTPutChar()'s "wait for space then
+	 * write" is not atomic, so two concurrent poll_out() callers can both see
+	 * the last free entry and both write it -- silently dropping one byte (a
+	 * TX FIFO overflow is not flagged). Lock only around the check+write, not
+	 * the wait, so interrupts are not disabled while spinning.
+	 */
+	while (true) {
+		key = irq_lock();
+		if (UARTSpaceAvailable(config->reg)) {
+			UARTPutCharNonBlocking(config->reg, c);
+			irq_unlock(key);
+			break;
+		}
+		irq_unlock(key);
+	}
 
 #ifdef CONFIG_PM_DEVICE
 	/* Wait for character to be transmitted to ensure CPU
@@ -689,8 +705,11 @@ static int uart_lpf3_async_rx_enable(const struct device *dev, uint8_t *buf, siz
 	 * asserted after 32 idle bit times); that handler only moves bytes into the
 	 * buffer, it never notifies, so it does not double-serve the poll below.
 	 */
-	UARTClearInt(config->reg, UART_INT_RT);
-	UARTEnableInt(config->reg, UART_INT_RT);
+	UARTClearInt(config->reg, UART_INT_RT | UART_INT_OE);
+	UARTEnableInt(config->reg, UART_INT_RT | UART_INT_OE);
+
+	/* Surface an RX overrun to the application instead of dropping silently. */
+	UARTClearRxError(config->reg);
 
 	data->rx_buf = buf;
 	data->rx_len = len;
@@ -783,7 +802,7 @@ static int uart_lpf3_async_rx_disable(const struct device *dev)
 		goto unlock;
 	}
 
-	UARTDisableInt(config->reg, UART_INT_RT);
+	UARTDisableInt(config->reg, UART_INT_RT | UART_INT_OE);
 
 	dma_stop(config->dma_dev, config->dma_channel_rx);
 
@@ -864,7 +883,7 @@ static void uart_lpf3_rx_buf_complete(const struct device *dev)
 		data->rx_buf = NULL;
 		data->rx_len = 0;
 
-		UARTDisableInt(config->reg, UART_INT_RT);
+		UARTDisableInt(config->reg, UART_INT_RT | UART_INT_OE);
 
 		if (data->async_callback) {
 			evt.type = UART_RX_DISABLED;
@@ -1060,6 +1079,51 @@ static void uart_lpf3_isr(const struct device *dev)
 		}
 
 		irq_unlock(key);
+	}
+
+	if (int_status & UART_INT_OE) {
+		bool stopped = false;
+
+		/* Clear the RX error interrupt latches (RSR is cleared via err_check). */
+		UARTClearInt(config->reg,
+			     UART_INT_OE | UART_INT_BE | UART_INT_PE | UART_INT_FE);
+
+		key = irq_lock();
+
+		if (data->rx_len != 0) {
+			struct dma_status rx_stat;
+			size_t rx_count = data->rx_len;
+
+			if (dma_get_status(config->dma_dev, config->dma_channel_rx,
+					   &rx_stat) == 0) {
+				rx_count = data->rx_len - rx_stat.pending_length;
+			}
+
+			if (data->async_callback) {
+				evt.type = UART_RX_STOPPED;
+				evt.data.rx_stop.reason = uart_lpf3_err_check(dev);
+				evt.data.rx_stop.data.buf = data->rx_buf;
+				evt.data.rx_stop.data.offset = data->rx_processed_len;
+				evt.data.rx_stop.data.len = rx_count - data->rx_processed_len;
+
+				data->async_callback(dev, &evt, data->async_user_data);
+			}
+
+			/* Delivered above with UART_RX_STOPPED; don't re-deliver on stop. */
+			data->rx_processed_len = rx_count;
+			stopped = true;
+		}
+
+		irq_unlock(key);
+
+		/*
+		 * An overrun desynchronizes the RX stream, so stop the transfer
+		 * (release buffers + UART_RX_DISABLED); the application re-enables.
+		 * Done outside the lock since rx_disable takes its own.
+		 */
+		if (stopped) {
+			(void)uart_lpf3_async_rx_disable(dev);
+		}
 	}
 #endif
 }
