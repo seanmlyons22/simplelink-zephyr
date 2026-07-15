@@ -275,12 +275,24 @@ static void spi_cc23x0_cc27xx_isr(const struct device *dev)
 		SPIClearInt(cfg->base, SPI_DMA_DONE_RX);
 #endif
 		SPIClearInt(cfg->base, SPI_RXFIFO_OVF);
+		SPIDisableInt(cfg->base, SPI_CC23X0_CC27XX_INT_MASK);
 		spi_cc23x0_cc27xx_reset_txrx_fifos(dev);
+#ifndef CONFIG_SPI_SLAVE
+		spi_context_cs_control(ctx, false);
+#endif /* CONFIG_SPI_SLAVE */
+		/*
+		 * Release the PM constraint taken in transceive_internal(). The
+		 * context lock is released by the waiting thread (sync) or by
+		 * spi_context_complete() itself (async).
+		 */
+		spi_cc23x0_cc27xx_pm_policy_state_lock_put();
 		spi_context_complete(ctx, dev, SPI_CC23X0_CC27XX_STATUS_ERROR_RX_FIFO_OVERFLOW);
 	}
 
 #ifdef CONFIG_SPI_CC23X0_CC27XX_DMA_DRIVEN
 	else if (status & SPI_DMA_DONE_RX) {
+		int ret;
+
 		dma_stop(cfg->dma_dev, cfg->dma_channel_tx);
 		dma_stop(cfg->dma_dev, cfg->dma_channel_rx);
 		SPIClearInt(cfg->base, SPI_DMA_DONE_RX);
@@ -288,13 +300,21 @@ static void spi_cc23x0_cc27xx_isr(const struct device *dev)
 		spi_context_update_tx(ctx, SPI_CC23X0_CC27XX_DFS, data->dma_curr_xfer_len);
 		spi_context_update_rx(ctx, SPI_CC23X0_CC27XX_DFS, data->dma_curr_xfer_len);
 		if (data->ctx.rx_len > 0 || data->ctx.tx_len > 0) {
-			spi_cc23xo_prime_transceive(dev, data->ctx.config);
+			ret = spi_cc23xo_prime_transceive(dev, data->ctx.config);
+			if (ret) {
+				/* Could not re-arm DMA: fail the transfer instead of hanging */
+				SPIDisableInt(cfg->base, SPI_CC23X0_CC27XX_INT_MASK);
+#ifndef CONFIG_SPI_SLAVE
+				spi_context_cs_control(ctx, false);
+#endif /* CONFIG_SPI_SLAVE */
+				spi_cc23x0_cc27xx_pm_policy_state_lock_put();
+				spi_context_complete(ctx, dev, ret);
+			}
 		} else {
 			SPIDisableInt(cfg->base, SPI_CC23X0_CC27XX_INT_MASK);
 #ifndef CONFIG_SPI_SLAVE
 			spi_context_cs_control(ctx, false);
 #endif /* CONFIG_SPI_SLAVE */
-			spi_context_release(ctx, SPI_CC23X0_CC27XX_STATUS_SUCCESS);
 			spi_cc23x0_cc27xx_pm_policy_state_lock_put();
 			spi_context_complete(ctx, dev, SPI_CC23X0_CC27XX_STATUS_SUCCESS);
 		}
@@ -493,7 +513,7 @@ static int spi_cc23xo_prime_transceive(const struct device *dev, const struct sp
 		 * discarding received data by writing it to a dummy variable.
 		 */
 		if (!ctx->rx_buf || (data->ctx.rx_count == 0 && data->ctx.rx_len == 0)) {
-			data->block_cfg_rx.dest_address = (uint32_t)dummy_rx_data;
+			data->block_cfg_rx.dest_address = (uint32_t)&dummy_rx_data;
 			data->block_cfg_rx.dest_addr_adj = DMA_ADDR_ADJ_NO_CHANGE;
 		}
 
@@ -508,12 +528,14 @@ static int spi_cc23xo_prime_transceive(const struct device *dev, const struct sp
 		if (ret) {
 			LOG_ERR("Failed to configure DMA TX channel");
 			SPIDisableInt(cfg->base, SPI_CC23X0_CC27XX_INT_MASK);
+			return ret;
 		}
 
 		ret = dma_config(cfg->dma_dev, cfg->dma_channel_rx, &data->dma_cfg_rx);
 		if (ret) {
 			LOG_ERR("Failed to configure DMA RX channel");
 			SPIDisableInt(cfg->base, SPI_CC23X0_CC27XX_INT_MASK);
+			return ret;
 		}
 
 		/* Start DMA channels */
@@ -530,7 +552,13 @@ static int spi_cc23xo_prime_transceive(const struct device *dev, const struct sp
 		/* Enable DMA; Triggers transfer */
 		SPIEnableDMA(cfg->base, SPI_DMA_TX | SPI_DMA_RX);
 	} else {
-		spi_context_release(ctx, ret);
+		/* Nothing to transfer: complete immediately so waiters don't block */
+		SPIDisableInt(cfg->base, SPI_CC23X0_CC27XX_INT_MASK);
+#ifndef CONFIG_SPI_SLAVE
+		spi_context_cs_control(ctx, false);
+#endif /* CONFIG_SPI_SLAVE */
+		spi_cc23x0_cc27xx_pm_policy_state_lock_put();
+		spi_context_complete(ctx, dev, 0);
 	}
 
 	return ret;
@@ -645,7 +673,8 @@ static int spi_cc23x0_cc27xx_transceive_internal(const struct device *dev,
 		data->is_cs_sw_controlled = true;
 	}
 
-	if (data->cs_gpio == NULL && IS_ENABLED(CONFIG_SPI_SLAVE)) {
+	if (data->cs_gpio == NULL && IS_ENABLED(CONFIG_SPI_SLAVE) &&
+	    SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_SLAVE) {
 		/* NOTE: Removing this else-statement will remove the restriction of
 		 * 4-wire mode only for the slave. 3-wire would be supported. However,
 		 * note that the slave would be susceptible to errors due to glitches in
@@ -653,6 +682,7 @@ static int spi_cc23x0_cc27xx_transceive_internal(const struct device *dev,
 		 */
 		LOG_ERR("Slave only supports 4-wire mode. A SPI Chip Select "
 			"capable GPIO must be selected");
+		spi_context_release(ctx, -EINVAL);
 		return -EINVAL;
 	}
 
@@ -744,6 +774,13 @@ static int spi_cc23x0_cc27xx_transceive(const struct device *dev, const struct s
 	 * a non-zero positive value means success.
 	 */
 	ret = data->ctx.sync_status;
+
+	/*
+	 * Release the context lock only after the status has been consumed,
+	 * so a concurrent transfer cannot overwrite it. The ISR must not
+	 * release the lock for synchronous transfers.
+	 */
+	spi_context_release(&data->ctx, ret);
 
 	return ret;
 }
