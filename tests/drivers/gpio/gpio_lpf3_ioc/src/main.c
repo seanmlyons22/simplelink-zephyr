@@ -13,6 +13,7 @@
 #include <zephyr/sys/atomic.h>
 #include <zephyr/ztest.h>
 
+#include <driverlib/gpio.h>
 #include <inc/hw_ioc.h>
 #include <inc/hw_memmap.h>
 #include <inc/hw_types.h>
@@ -134,6 +135,20 @@ ZTEST(gpio_lpf3_ioc, test_shutdown_wake_polarity)
 	zassert_true(flags & GPIO_INT_WAKEUP, "get_config must report GPIO_INT_WAKEUP");
 
 	zassert_ok(gpio_pin_configure_dt(&in, GPIO_INPUT));
+}
+
+/*
+ * ngpios (and thus port_pin_mask) must not claim pins beyond the DIOs that
+ * exist on the device (cc23x0: DIO0-25, cc27xx/cc27xxx10: DIO0-30). A larger
+ * value lets nonexistent pins pass validation, so pin_configure writes land
+ * in reserved IOC space.
+ */
+ZTEST(gpio_lpf3_ioc, test_port_pin_mask_matches_hw)
+{
+	const struct gpio_driver_config *cfg = in.port->config;
+
+	zassert_equal(cfg->port_pin_mask & ~(uint32_t)GPIO_DIO_ALL_MASK, 0,
+		      "port_pin_mask allows pins beyond the device's DIOs");
 }
 
 ZTEST_SUITE(gpio_lpf3_ioc, NULL, suite_setup, test_before, test_after, NULL);

@@ -95,7 +95,7 @@
 				status = "disabled";
 				gpio-controller;
 				#gpio-cells = <2>;
-				ngpios = <33>;
+				ngpios = <31>;	/* Only [DIO0, DIO30] are available */
 		};
 
 		pinctrl: pinctrl@40003000 {
