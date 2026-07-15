@@ -57,9 +57,11 @@ static int gpio_cc23x0_config(const struct device *port, gpio_pin_t pin, gpio_fl
     }
 
 	/*
-	 * Keep the port configuration (pinmux). pinctrl takes care of the pinmux.
+	 * Keep the port configuration (pinmux, owned by pinctrl) and the
+	 * interrupt trigger (EDGEDET/WUENSB, owned by pin_interrupt_configure).
 	 */
-	config |= HWREG(iocfgRegAddr) & IOC_PORTCFG_MASK;
+	config |= HWREG(iocfgRegAddr) &
+		  (IOC_PORTCFG_MASK | IOC_IOC0_EDGEDET_M | IOC_IOC0_WUENSB_M);
 
 	if (flags & GPIO_PULL_UP) {
 		config |= IOC_IOC0_PULLCTL_PULL_UP;

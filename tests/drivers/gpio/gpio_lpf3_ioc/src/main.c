@@ -72,4 +72,22 @@ ZTEST(gpio_lpf3_ioc, test_int_wakeup_trig_accepted)
 	zassert_equal(atomic_get(&cb_count), 1, "no interrupt after rising edge");
 }
 
+/*
+ * gpio_pin_configure() must not disturb the interrupt trigger installed by
+ * gpio_pin_interrupt_configure(): EDGEDET/WUENSB live in the same IOCn
+ * register as the pin configuration.
+ */
+ZTEST(gpio_lpf3_ioc, test_pin_configure_preserves_int_trigger)
+{
+	zassert_ok(gpio_pin_interrupt_configure_dt(&in, GPIO_INT_EDGE_RISING));
+
+	/* Reconfigure the pin (e.g. runtime pull change) after the trigger */
+	zassert_ok(gpio_pin_configure_dt(&in, GPIO_INPUT | GPIO_PULL_DOWN));
+
+	zassert_ok(gpio_pin_set_raw(out.port, out.pin, 1));
+	k_sleep(K_MSEC(5));
+	zassert_equal(atomic_get(&cb_count), 1,
+		      "interrupt trigger lost after gpio_pin_configure()");
+}
+
 ZTEST_SUITE(gpio_lpf3_ioc, NULL, suite_setup, test_before, test_after, NULL);
