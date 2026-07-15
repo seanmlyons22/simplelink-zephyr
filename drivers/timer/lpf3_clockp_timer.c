@@ -158,11 +158,21 @@ static int sys_clock_driver_init(void)
 	uint32_t nowTick;
 
 	nowTick = ClockP_getSystemTicks();
-	last_clockp_tick = nowTick;
+
+	/*
+	 * Align the announce baseline to a multiple of the kernel tick period.
+	 * sys_clock_set_timeout() aligns compare values to absolute multiples
+	 * of CLOCKP_TICKS_PER_SYS_CLOCK_TICK (via the "now_tick %" phase
+	 * correction), so the baseline must sit on the same grid. With an
+	 * unaligned baseline every timeout fired one interrupt early with
+	 * sys_clock_announce(0) and completed one kernel tick late.
+	 */
+	last_clockp_tick = nowTick - (nowTick % CLOCKP_TICKS_PER_SYS_CLOCK_TICK);
 
 	/* Parameters for the system clock ClockP object */
 	ClockP_Params sysClockParams;
 
+	ClockP_Params_init(&sysClockParams);
 	sysClockParams.period = 0;
 	sysClockParams.startFlag = false;
 
