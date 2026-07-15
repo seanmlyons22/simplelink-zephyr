@@ -85,13 +85,18 @@ void sys_clock_set_timeout(int32_t ticks, bool idle)
 			/* Microseconds elapsed within the current tick period */
 			uint32_t clockp_tick_delta = now_tick % CLOCKP_TICKS_PER_SYS_CLOCK_TICK;
 
-			timeout = ticks * CLOCKP_TICKS_PER_SYS_CLOCK_TICK;
+			/*
+			 * Clamp before converting to ClockP ticks: the
+			 * multiplication overflows int32 for kernel timeouts
+			 * beyond SYSCLOCK_TIMEOUT_MAX ClockP ticks (~36 min at
+			 * 1 MHz / 10 kHz ticks). The clamped value is already
+			 * a multiple of CLOCKP_TICKS_PER_SYS_CLOCK_TICK.
+			 */
+			uint32_t max_ticks =
+				SYSCLOCK_TIMEOUT_MAX / CLOCKP_TICKS_PER_SYS_CLOCK_TICK;
 
-			if (timeout > SYSCLOCK_TIMEOUT_MAX) {
-				timeout = SYSCLOCK_TIMEOUT_MAX;
-				/* Align timeout to CLOCKP_TICKS_PER_SYS_CLOCK_TICK */
-				timeout -= timeout % CLOCKP_TICKS_PER_SYS_CLOCK_TICK;
-			}
+			timeout = MIN((uint32_t)ticks, max_ticks) *
+				  CLOCKP_TICKS_PER_SYS_CLOCK_TICK;
 
 			/*
 			 * We remove the delta since last tick boundary to get the
