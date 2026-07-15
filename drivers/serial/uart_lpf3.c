@@ -265,6 +265,15 @@ static int uart_lpf3_configure(const struct device *dev, const struct uart_confi
 #ifdef CONFIG_UART_LPF3_DMA_DRIVEN
 	/* Watermarks paired with the uDMA arbitration sizes (see UDMA_01 note) */
 	UARTSetFifoLevel(config->reg, UART_FIFO_TX2_8, UART_FIFO_RX6_8);
+#elif defined(CONFIG_UART_INTERRUPT_DRIVEN)
+	/*
+	 * Interrupt-driven RX: trigger the RX interrupt as early as possible
+	 * (1/4 full = 2 of 8 entries) to maximize the drain headroom before an
+	 * overrun on the shallow 8-entry FIFO when the ISR is delayed (e.g. by
+	 * concurrent RF activity). The receive-timeout interrupt (UART_INT_RT)
+	 * still flushes the sub-watermark tail.
+	 */
+	UARTSetFifoLevel(config->reg, UART_FIFO_TX4_8, UART_FIFO_RX2_8);
 #endif
 
 	data->uart_config = *cfg;
