@@ -489,6 +489,13 @@ static int uart_lpf3_async_tx(const struct device *dev, const uint8_t *buf, size
 		.user_data = NULL,
 	};
 
+	/*
+	 * Hold the transfer setup atomic against a concurrent tx_abort/timeout:
+	 * otherwise tx_halt could stop the channel between dma_start and
+	 * UARTEnableDMA and we would then re-start a transfer the caller was told
+	 * was aborted. On any setup error, clear the TX state so a later uart_tx()
+	 * is not wedged at -EBUSY.
+	 */
 	key = irq_lock();
 
 	if (data->tx_len) {
@@ -499,11 +506,9 @@ static int uart_lpf3_async_tx(const struct device *dev, const uint8_t *buf, size
 	data->tx_buf = buf;
 	data->tx_len = len;
 
-	irq_unlock(key);
-
 	ret = dma_config(config->dma_dev, config->dma_channel_tx, &dma_cfg_tx);
 	if (ret) {
-		return ret;
+		goto err;
 	}
 
 	/* Respond to burst requests only (UDMA_01 workaround) */
@@ -512,15 +517,15 @@ static int uart_lpf3_async_tx(const struct device *dev, const uint8_t *buf, size
 	/* Disable DMA trigger */
 	UARTDisableDMA(config->reg, UART_DMA_TX);
 
-	/* Schedule timeout work */
-	if (timeout != SYS_FOREVER_US) {
-		k_work_reschedule(&data->tx_timeout_work, K_USEC(timeout));
-	}
-
 	/* Start DMA channel */
 	ret = dma_start(config->dma_dev, config->dma_channel_tx);
 	if (ret) {
-		return ret;
+		goto err;
+	}
+
+	/* Schedule timeout work */
+	if (timeout != SYS_FOREVER_US) {
+		k_work_reschedule(&data->tx_timeout_work, K_USEC(timeout));
 	}
 
 	/* Lock PM */
@@ -529,7 +534,15 @@ static int uart_lpf3_async_tx(const struct device *dev, const uint8_t *buf, size
 	/* Enable DMA trigger to start the transfer */
 	UARTEnableDMA(config->reg, UART_DMA_TX);
 
+	irq_unlock(key);
+
 	return 0;
+
+err:
+	data->tx_buf = NULL;
+	data->tx_len = 0;
+	irq_unlock(key);
+	return ret;
 }
 
 static int uart_lpf3_tx_halt(struct uart_lpf3_data *data)
@@ -1122,9 +1135,15 @@ static int uart_lpf3_init_common(const struct device *dev)
 
 	UARTEnableInt(config->reg, UART_INT_TXDMADONE | UART_INT_RXDMADONE);
 
-	k_work_init_delayable(&data->tx_timeout_work, uart_lpf3_async_tx_timeout);
-
-	data->dev = dev;
+	/*
+	 * One-time init only: init_common() also runs on PM resume, and
+	 * re-initializing a possibly-scheduled work item is undefined. data->dev
+	 * is zero-initialized, so a NULL here marks the very first call.
+	 */
+	if (data->dev == NULL) {
+		k_work_init_delayable(&data->tx_timeout_work, uart_lpf3_async_tx_timeout);
+		data->dev = dev;
+	}
 #endif
 
 #ifdef CONFIG_PM_DEVICE
@@ -1166,6 +1185,20 @@ static int uart_lpf3_pm_action(const struct device *dev, enum pm_device_action a
 
 	switch (action) {
 	case PM_DEVICE_ACTION_SUSPEND:
+#ifdef CONFIG_UART_LPF3_DMA_DRIVEN
+		/*
+		 * Refuse to suspend mid-transfer: UARTDisable() clears LCRH.FEN
+		 * (flushing the RX FIFO) and drops DMACTL/IMSC, which would wedge
+		 * an in-flight async transfer (no completion ever arrives).
+		 */
+		{
+			struct uart_lpf3_data *data = dev->data;
+
+			if (data->rx_len || data->tx_len) {
+				return -EBUSY;
+			}
+		}
+#endif
 		UARTDisable(config->reg);
 		CLKCTLDisable(CLKCTL_BASE, config->clkctl_id);
 		return 0;
