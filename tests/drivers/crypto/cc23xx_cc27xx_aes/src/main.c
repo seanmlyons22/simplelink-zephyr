@@ -327,6 +327,28 @@ ZTEST(crypto_lpf3_aes, test_ccm_kat)
 	zassert_mem_equal(back, ccm_data, sizeof(ccm_data), "CCM roundtrip mismatch");
 }
 
+/*
+ * Auth-only CCM (RFC 3610 with zero-length payload) must produce the
+ * CBC-MAC of B0 and B1 only; no data block may be fed to the engine.
+ * Expected tag generated with the Python "cryptography" AESCCM
+ * implementation for ccm_key/ccm_nonce/ccm_hdr and empty payload.
+ */
+ZTEST(crypto_lpf3_aes, test_ccm_empty_payload)
+{
+	static const uint8_t expected_tag[8] = {
+		0xe4, 0x28, 0x8a, 0xc3, 0x78, 0x00, 0x0f, 0xf5,
+	};
+	uint8_t out[16] = {0};
+	uint8_t tag[8] = {0};
+
+	zassert_ok(ccm_op(CRYPTO_CIPHER_OP_ENCRYPT, out, 0, out, sizeof(out), tag),
+		   "CCM auth-only encrypt failed");
+	zassert_mem_equal(tag, expected_tag, sizeof(tag), "CCM auth-only tag mismatch");
+
+	zassert_ok(ccm_op(CRYPTO_CIPHER_OP_DECRYPT, out, 0, out, sizeof(out), tag),
+		   "CCM auth-only decrypt failed");
+}
+
 ZTEST(crypto_lpf3_aes, test_ccm_tag_mismatch)
 {
 	uint8_t out[23] = {0};

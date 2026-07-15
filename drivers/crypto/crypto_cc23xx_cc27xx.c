@@ -361,7 +361,8 @@ static int crypto_cc23xx_cc27xx_ctr(struct cipher_ctx *ctx, struct cipher_pkt *p
 	uint8_t last_buf[AES_BLOCK_SIZE] = {0};
 	int bytes_processed = 0;
 	int iv_len;
-	int ret;
+	/* No wait is performed when in_len == 0 (e.g. auth-only CCM) */
+	int ret = 0;
 #ifdef CONFIG_CRYPTO_CC23XX_CC27XX_DMA
 	uint32_t int_flags = AES_IMASK_CHBDONE;
 	const struct crypto_cc23xx_cc27xx_config *cfg = dev->config;
@@ -568,7 +569,7 @@ static int crypto_cc23xx_cc27xx_cmac(struct cipher_ctx *ctx, struct cipher_pkt *
 	struct crypto_cc23xx_cc27xx_data *data = dev->data;
 	uint32_t iv[AES_BLOCK_SIZE_WORDS] = {0};
 	int bytes_processed = 0;
-	int ret;
+	int ret = 0;
 #ifdef CONFIG_CRYPTO_CC23XX_CC27XX_DMA
 	uint32_t int_flags = AES_IMASK_CHADONE;
 	const struct crypto_cc23xx_cc27xx_config *cfg = dev->config;
@@ -755,7 +756,7 @@ static int crypto_cc23xx_cc27xx_cmac(struct cipher_ctx *ctx, struct cipher_pkt *
 
 	bytes_processed = pkt->in_len;
 #else
-	do {
+	while (bytes_remaining > 0) {
 		/* Load input block */
 		if (bytes_remaining >= AES_BLOCK_SIZE) {
 			block_size = AES_BLOCK_SIZE;
@@ -776,7 +777,7 @@ static int crypto_cc23xx_cc27xx_cmac(struct cipher_ctx *ctx, struct cipher_pkt *
 
 		bytes_processed += block_size;
 		bytes_remaining -= block_size;
-	} while (bytes_remaining > 0);
+	}
 #endif
 
 	/* Read tag */
