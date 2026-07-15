@@ -7,7 +7,7 @@ description: TI SimpleLink LPF3 RTC
 
 compatible: "ti,lpf3-rtc-timer"
 
-include: rtc.yaml
+include: [rtc.yaml, rtc-device.yaml]
 
 properties:
   reg:
