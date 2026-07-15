@@ -321,6 +321,8 @@ void pm_state_exit_post_ops(enum pm_state state, uint8_t substate_id)
 	__set_PRIMASK(0);
 }
 
+#endif /* CONFIG_PM */
+
 #ifdef CONFIG_REBOOT
 
 FUNC_NORETURN void sys_arch_reboot(int type)
@@ -335,8 +337,6 @@ FUNC_NORETURN void sys_arch_reboot(int type)
 }
 
 #endif /* CONFIG_REBOOT */
-
-#endif /* CONFIG_PM */
 
 static int power_initialize(void)
 {
