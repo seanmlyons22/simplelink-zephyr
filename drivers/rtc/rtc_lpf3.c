@@ -32,14 +32,29 @@
 	(RTC_ALARM_TIME_MASK_SECOND | RTC_ALARM_TIME_MASK_MINUTE | RTC_ALARM_TIME_MASK_HOUR |      \
 	 RTC_ALARM_TIME_MASK_MONTHDAY | RTC_ALARM_TIME_MASK_MONTH | RTC_ALARM_TIME_MASK_WEEKDAY)
 
-/* This is maximum value of the RTC compare event in seconds (9.5hrs approx.) */
-#define RTC_TI_LPF3_MAX_ALARM_DIFFERENCE_TIME (34360U)
+/*
+ * Maximum alarm interval programmed into the compare channel in one step, in
+ * seconds. CH0CC8U is a 32-bit compare against TIME8U (8 us units, 125000
+ * ticks per second), so the full range is 2^32 * 8 us = 34359.7 s. In
+ * addition, the RTC treats a compare value up to 1 s (125000 ticks) behind
+ * TIME8U as "in the past" and fires immediately (TRM 12.4.2), so the largest
+ * usable future delta is 2^32 - 125000 - 1 ticks = 34358.7 s.
+ */
+#define RTC_TI_LPF3_MAX_ALARM_DIFFERENCE_TIME (34358U)
 
 /* RTC comparator event register (8us), CCH08U has a resolution of 8us.
  * This is a helper macro to convert seconds to 8 microsecond units.
  */
 
 #define RTC_TI_LPF3_SECONDS_TO_8US(x) ((x) * 125000)
+
+/* The max interval must stay clear of both the 32-bit CH0CC8U wrap and the
+ * 1 s in-the-past window, or long alarms fire (2^32 mod 125000*MAX) ticks
+ * early instead of chaining through partial compare intervals.
+ */
+BUILD_ASSERT((uint64_t)RTC_TI_LPF3_MAX_ALARM_DIFFERENCE_TIME * 125000ULL <
+		     (1ULL << 32) - 125000ULL,
+	     "max alarm interval overflows the CH0CC8U compare range");
 
 struct rtc_ti_lpf3_data {
 	struct k_spinlock lock;
