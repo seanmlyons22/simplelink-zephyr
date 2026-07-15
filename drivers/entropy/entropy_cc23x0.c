@@ -229,7 +229,7 @@ static int_fast16_t entropy_health_tests(uint32_t *noise_data)
 	for (size_t i = 0U; i < CONFIG_ENTROPY_CC23X0_NOISE_INPUT_WORD_LENGTH; i++) {
 		new_word = noise_data[i];
 
-		if (CONFIG_ENTROPY_CC23X0_RCT_ENABLED) {
+		if (IS_ENABLED(CONFIG_ENTROPY_CC23X0_RCT_ENABLED)) {
 			return_value = execute_rct(last_word, new_word,
 						&count_repeated_iac, &count_repeated_qac);
 			if (return_value != 0) {
@@ -238,7 +238,7 @@ static int_fast16_t entropy_health_tests(uint32_t *noise_data)
 			last_word = new_word;
 		}
 
-		if (CONFIG_ENTROPY_CC23X0_APT_ENABLED) {
+		if (IS_ENABLED(CONFIG_ENTROPY_CC23X0_APT_ENABLED)) {
 			qa_codes = new_word & 0xFFFF;
 			add_codes_to_apt_densities(qa_codes, densities);
 			ia_codes = new_word >> 16;
@@ -332,7 +332,8 @@ static int entropy_cc23x0_init(const struct device *dev)
 		}
 
 		rcl_status = 0;
-		if (CONFIG_ENTROPY_CC23X0_RCT_ENABLED || CONFIG_ENTROPY_CC23X0_APT_ENABLED) {
+		if (IS_ENABLED(CONFIG_ENTROPY_CC23X0_RCT_ENABLED) ||
+		    IS_ENABLED(CONFIG_ENTROPY_CC23X0_APT_ENABLED)) {
 			/* Perform Health Checks on the noise data before generating entropy */
 			rcl_status = entropy_health_tests(rcl_noise);
 		}
