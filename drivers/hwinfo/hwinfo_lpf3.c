@@ -27,7 +27,20 @@ int z_impl_hwinfo_get_reset_cause(uint32_t *cause)
 
 	reset_src = PowerLPF3_getResetReason();
 
+	/* Default to no known cause: PowerLPF3_getResetReason() can return
+	 * values with no Zephyr equivalent (e.g. PowerLPF3_RESET_UNKNOWN),
+	 * which must not leave *cause uninitialized.
+	 */
+	*cause = 0;
+
 	switch (reset_src) {
+	case PMCTL_RESET_SHUTDOWN_IO:
+	case PMCTL_RESET_SHUTDOWN_SWD:
+		*cause = RESET_LOW_POWER_WAKE;
+		break;
+	case PMCTL_RESET_CPU:
+		*cause = RESET_SOFTWARE;
+		break;
 	case PMCTL_RESET_POR:
 		*cause = RESET_POR;
 		break;
@@ -83,7 +96,8 @@ int z_impl_hwinfo_get_supported_reset_cause(uint32_t *supported)
 		      | RESET_TEMPERATURE
 			  | RESET_WATCHDOG
 			  | RESET_CPU_LOCKUP
-			  | RESET_DEBUG);
+			  | RESET_DEBUG
+			  | RESET_LOW_POWER_WAKE);
 	#elif CONFIG_SOC_SERIES_CC27XX
 	*supported = (RESET_POR
 			  | RESET_PIN
@@ -94,6 +108,7 @@ int z_impl_hwinfo_get_supported_reset_cause(uint32_t *supported)
 			  | RESET_WATCHDOG
 			  | RESET_CPU_LOCKUP
 			  | RESET_DEBUG
+			  | RESET_LOW_POWER_WAKE
 			  | RESET_SECURITY
 			  | RESET_PARITY);
 	#endif
