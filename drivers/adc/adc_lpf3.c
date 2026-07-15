@@ -391,8 +391,8 @@ static int adc_lpf3_calc_clk_cfg(uint32_t acq_time_ns, uint8_t *clk_div, uint16_
 	uint32_t samp_duration_ns;
 	uint32_t min_delta_res = UINT32_MAX;
 	uint32_t delta_res;
-	uint16_t min_cycles = ADC_LPF3_MAX_CYCLES;
-	uint16_t cycles;
+	uint32_t min_cycles = ADC_LPF3_MAX_CYCLES;
+	uint32_t cycles;
 	uint8_t divider;
 	float clock_period_ns;
 
@@ -408,6 +408,16 @@ static int adc_lpf3_calc_clk_cfg(uint32_t acq_time_ns, uint8_t *clk_div, uint16_
 
 		/* Calculate the number of cycles needed to meet or exceed acq_time_ns */
 		cycles = DIV_ROUND_UP(acq_time_ns, clock_period_ns);
+
+		/* Skip dividers that cannot reach the requested duration
+		 * within the 10-bit SCOMP cycle count. Without this check,
+		 * cycle counts that no longer fit the old uint16_t
+		 * intermediate silently wrapped and could select a sample
+		 * duration orders of magnitude too short.
+		 */
+		if (cycles > ADC_LPF3_MAX_CYCLES) {
+			continue;
+		}
 
 		/* Calculate the delta between the requested and actual sample durations */
 		samp_duration_ns = clock_period_ns * cycles;
