@@ -301,13 +301,12 @@ void pm_state_exit_post_ops(enum pm_state state, uint8_t substate_id)
 
 void sys_arch_reboot(int type)
 {
-	switch (type) {
-	case SYS_REBOOT_WARM:
-		Power_reset();
-		break;
-	case SYS_REBOOT_COLD:
-		break;
-	}
+	ARG_UNUSED(type);
+
+	/* A PMCTL system reset is the deepest reset triggerable from
+	 * software; use it for both warm and cold reboot requests.
+	 */
+	Power_reset();
 }
 
 #endif /* CONFIG_REBOOT */
