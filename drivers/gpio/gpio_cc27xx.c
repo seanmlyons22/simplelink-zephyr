@@ -69,9 +69,10 @@ static int gpio_cc27xx_config(const struct device *port, gpio_pin_t pin, gpio_fl
 		config |= IOC_IOC0_PULLCTL_PULL_DIS;
 	}
 
-	/* Allow interrupts to trigger in shutdown */
+	/* Wake from shutdown when the pin reaches its active level */
 	if (flags & GPIO_INT_WAKEUP) {
-		config |= IOC_IOC0_WUCFGSD_WAKE_LOW;
+		config |= (flags & GPIO_ACTIVE_LOW) ? IOC_IOC0_WUCFGSD_WAKE_LOW
+						    : IOC_IOC0_WUCFGSD_WAKE_HIGH;
 	}
 
 	/* In single-ended mode a GPIO is either open drain or open source */
@@ -155,7 +156,9 @@ static int gpio_cc27xx_get_config(const struct device *port, gpio_pin_t pin, gpi
 		outFlag |= GPIO_PULL_DOWN;
 	}
 
-	if (config & IOC_IOC0_WUENSB) {
+	uint32_t wucfgsd = config & IOC_IOC0_WUCFGSD_M;
+
+	if (wucfgsd == IOC_IOC0_WUCFGSD_WAKE_LOW || wucfgsd == IOC_IOC0_WUCFGSD_WAKE_HIGH) {
 		outFlag |= GPIO_INT_WAKEUP;
 	}
 

@@ -113,4 +113,27 @@ ZTEST(gpio_lpf3_ioc, test_int_configure_preserves_portcfg)
 		      "pin_interrupt_configure rewrote PORTCFG (pinmux)");
 }
 
+/*
+ * GPIO_INT_WAKEUP at configure time arms wake-from-shutdown (WUCFGSD), which
+ * is level-based: it must follow the pin's active level, not always wake-low.
+ */
+ZTEST(gpio_lpf3_ioc, test_shutdown_wake_polarity)
+{
+	zassert_ok(gpio_pin_configure_dt(&in, GPIO_INPUT | GPIO_INT_WAKEUP));
+	zassert_equal(IOC_REG(in.pin) & IOC_IOC0_WUCFGSD_M, IOC_IOC0_WUCFGSD_WAKE_HIGH,
+		      "active-high pin must wake on high level");
+
+	zassert_ok(gpio_pin_configure(in.port, in.pin,
+				      GPIO_INPUT | GPIO_ACTIVE_LOW | GPIO_INT_WAKEUP));
+	zassert_equal(IOC_REG(in.pin) & IOC_IOC0_WUCFGSD_M, IOC_IOC0_WUCFGSD_WAKE_LOW,
+		      "active-low pin must wake on low level");
+
+	gpio_flags_t flags;
+
+	zassert_ok(gpio_pin_get_config(in.port, in.pin, &flags));
+	zassert_true(flags & GPIO_INT_WAKEUP, "get_config must report GPIO_INT_WAKEUP");
+
+	zassert_ok(gpio_pin_configure_dt(&in, GPIO_INPUT));
+}
+
 ZTEST_SUITE(gpio_lpf3_ioc, NULL, suite_setup, test_before, test_after, NULL);
