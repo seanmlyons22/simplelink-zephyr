@@ -212,9 +212,14 @@ void pm_cc27xx_enter_standby(void)
 			sysTimerDelta = MAX_SYSTIMER_DELTA;
 		}
 
-		/* Calculate pending time to RTC compare event. */
+		/* Calculate pending time to RTC compare event.
+		 * Check the armed state, not IMASK: the compare channel only
+		 * generates an event while armed (it auto-disarms when the
+		 * event triggers), and a stale IMASK with a disarmed channel
+		 * would otherwise be evaluated against an old compare value.
+		 */
 
-		if (HWREG(RTC_BASE + RTC_O_IMASK) & RTC_ARMSET_CH0_SET) {
+		if (HWREG(RTC_BASE + RTC_O_ARMSET) & RTC_ARMSET_CH0_SET) {
 
 			rtcDelta1Us = (((uint64_t)(rtcCH0CC8U - rtcTIME8U) * 8ULL)) - 32ULL;
 
