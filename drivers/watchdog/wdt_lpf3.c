@@ -28,10 +28,20 @@
 
 LOG_MODULE_REGISTER(wdt_ti_lpf3, CONFIG_WDT_LOG_LEVEL);
 
-/* Register access macros for each chip family */
+/* Register access macros for each chip family.
+ *
+ * WDT_UNLOCK polls until the unlock takes effect (LOCK reads 0): the lock
+ * state synchronizes to the watchdog clock domain, and a WDTCNT/WDTTEST
+ * write issued while still locked is silently dropped (see driverlib
+ * CKMDUnlockWatchdog(), which uses the same poll on both families). A
+ * dropped WDTCNT write in feed() would let the watchdog expire.
+ */
 #if defined(CONFIG_SOC_SERIES_CC23X0)
 /* CC23X0 register access macros */
-#define WDT_UNLOCK(_base)       (HWREG((_base) + CKMD_O_WDTLOCK) = 0x1ACCE551)
+#define WDT_UNLOCK(_base)                                                      \
+	do {                                                                   \
+		HWREG((_base) + CKMD_O_WDTLOCK) = 0x1ACCE551;                  \
+	} while (HWREG((_base) + CKMD_O_WDTLOCK) == 0x1)
 #define WDT_LOCK(_base)         (HWREG((_base) + CKMD_O_WDTLOCK) = 0x1)
 #define WDT_FEED(_base, _value) (HWREG((_base) + CKMD_O_WDTCNT) = (_value))
 #define WDT_STALL_ENABLE(_base) (HWREG((_base) + CKMD_O_WDTTEST) = 0x1)
@@ -39,7 +49,10 @@ LOG_MODULE_REGISTER(wdt_ti_lpf3, CONFIG_WDT_LOG_LEVEL);
 
 #elif defined(CONFIG_SOC_SERIES_CC27XX)
 /* CC27XX register access macros */
-#define WDT_UNLOCK(_base)       (HWREG((_base) + CKMD_O_LOCK) = 0x1ACCE551)
+#define WDT_UNLOCK(_base)                                                      \
+	do {                                                                   \
+		HWREG((_base) + CKMD_O_LOCK) = 0x1ACCE551;                     \
+	} while (HWREG((_base) + CKMD_O_LOCK) == 0x1)
 #define WDT_LOCK(_base)         (HWREG((_base) + CKMD_O_LOCK) = 0x1)
 #define WDT_FEED(_base, _value) (HWREG((_base) + CKMD_O_CNT) = (_value))
 #define WDT_STALL_ENABLE(_base) (HWREG((_base) + CKMD_O_TEST) = 0x1)
