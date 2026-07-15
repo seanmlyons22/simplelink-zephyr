@@ -52,8 +52,12 @@ LOG_MODULE_REGISTER(wdt_ti_lpf3, CONFIG_WDT_LOG_LEVEL);
  * Convert milliseconds to watchdog ticks with proper rounding.
  * Formula:  ticks = (ms * 32768) / 1000
  * Use (ms * 32768 + 500) / 1000 for rounding to nearest integer.
+ * The intermediate product exceeds 32 bits for ms > 131071, so it must
+ * be computed in 64-bit; the result fits uint32_t for any ms up to
+ * WDT_MAX_RELOAD_MS.
  */
-#define WDT_MS_TO_TICKS(_ms) (((_ms) * WDT_SOURCE_FREQ + 500) / 1000)
+#define WDT_MS_TO_TICKS(_ms) \
+	((uint32_t)(((uint64_t)(_ms) * WDT_SOURCE_FREQ + 500) / 1000))
 #define WDT_MAX_RELOAD_MS   (0xffffffffUL / WDT_SOURCE_FREQ * 1000)
 
 /* Common data structures */
