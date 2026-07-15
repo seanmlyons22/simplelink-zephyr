@@ -1,0 +1,19 @@
+/*
+ * cc2340R5: uart0 as the HCI H4 transport to the host. No RTS/CTS wired on the
+ * LaunchPad, so no hw-flow-control here. Console/log move to SEGGER RTT (see
+ * the board .conf) so the single uart0 is free for HCI.
+ */
+/ {
+	chosen {
+		zephyr,bt-c2h-uart = &uart0;
+		/delete-property/ zephyr,console;
+		/delete-property/ zephyr,shell-uart;
+		/delete-property/ zephyr,uart-mcumgr;
+		/delete-property/ zephyr,bt-mon-uart;
+	};
+};
+
+&uart0 {
+	status = "okay";
+	current-speed = <115200>;
+};
