@@ -429,10 +429,17 @@ static int crypto_cc23xx_cc27xx_ctr(struct cipher_ctx *ctx, struct cipher_pkt *p
 	/* Load key */
 	AESWriteKEY(ctx->key.bit_stream);
 
-	/* Configure source buffer and encryption triggers */
+	/*
+	 * Configure source buffer and encryption triggers. BUSHALT stalls CPU
+	 * accesses to TXT/TXTX until the pending counter-block encryption
+	 * completes: the CPU data path requires it (TRM 16.3.4 waits for
+	 * STA.STATE = IDLE before writing TXTX; driverlib aes.h documents
+	 * "AUTOCFG.BUSHALT must be enabled" for CPU processing), otherwise
+	 * the partial-block XOR below can race a busy engine.
+	 */
 	AESSetAUTOCFG(AES_AUTOCFG_AESSRC_BUF | AES_AUTOCFG_TRGAES_RDTXT3 |
 		      AES_AUTOCFG_TRGAES_WRBUF3S | AES_AUTOCFG_CTRENDN_BIGENDIAN |
-		      AES_AUTOCFG_CTRSIZE_CTR128);
+		      AES_AUTOCFG_CTRSIZE_CTR128 | AES_AUTOCFG_BUSHALT_EN);
 
 #ifdef CONFIG_CRYPTO_CC23XX_CC27XX_DMA
 	if (dma_len) {
