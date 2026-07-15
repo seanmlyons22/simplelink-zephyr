@@ -1,11 +1,17 @@
+common:
+  tags: pm
+  platform_allow:
+    - lp_em_cc2340r5
+    - lp_em_cc2340r53
+    - lp_em_cc2340r53_wcsp
+    - lp_em_cc2340r5moda
+    - lp_em_cc2745r10_q1/cc2745r10_q1
+    - lp_em_cc2745r10_q1/cc2755r10
+    - lp_em_cc2755p10
+
 tests:
-  pm.soc.lpf3.standby:
-    tags: pm
-    platform_allow:
-      - lp_em_cc2340r5
-      - lp_em_cc2340r53
-      - lp_em_cc2340r53_wcsp
-      - lp_em_cc2340r5moda
-      - lp_em_cc2745r10_q1/cc2745r10_q1
-      - lp_em_cc2745r10_q1/cc2755r10
-      - lp_em_cc2755p10
+  pm.soc.lpf3.standby: {}
+  pm.soc.lpf3.standby.dma_runtime_pm:
+    extra_configs:
+      - CONFIG_DMA=y
+      - CONFIG_PM_DEVICE_RUNTIME=y

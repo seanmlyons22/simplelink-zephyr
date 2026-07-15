@@ -20,6 +20,11 @@
 #include <inc/hw_memmap.h>
 #include <inc/hw_rtc.h>
 
+#ifdef CONFIG_DMA
+#include <zephyr/device.h>
+#include <inc/hw_dma.h>
+#endif
+
 static Power_NotifyObj notify_obj;
 static volatile uint32_t awake_standby_count;
 
@@ -81,5 +86,32 @@ ZTEST(pm_standby, test_standby_with_stale_rtc_imask)
 	zassert_true(awake_standby_count > 0,
 		     "standby was skipped because of stale RTC CH0 IMASK/compare state");
 }
+
+#ifdef CONFIG_DMA
+/* Standby powers down the peripheral domain and the uDMA control table base
+ * (DMA.CTRL) has no retention. It must be reprogrammed on every wakeup, even
+ * when devices are not suspended/resumed around standby (e.g. with
+ * CONFIG_PM_DEVICE_RUNTIME, where system-managed device PM is disabled).
+ */
+ZTEST(pm_standby, test_dma_ctrl_base_survives_standby)
+{
+	const struct device *const dma = DEVICE_DT_GET(DT_NODELABEL(dma));
+	uint32_t ctrl_base;
+
+	zassert_true(device_is_ready(dma), "DMA not ready");
+
+	ctrl_base = HWREG(DMA_BASE + DMA_O_CTRL);
+	zassert_not_equal(ctrl_base, 0, "DMA control table base not programmed");
+
+	awake_standby_count = 0;
+
+	k_sleep(K_MSEC(500));
+
+	zassert_true(awake_standby_count > 0,
+		     "SoC did not enter standby during a 500 ms sleep");
+	zassert_equal(HWREG(DMA_BASE + DMA_O_CTRL), ctrl_base,
+		      "DMA control table base lost across standby");
+}
+#endif /* CONFIG_DMA */
 
 ZTEST_SUITE(pm_standby, NULL, pm_standby_setup, NULL, NULL, NULL);
