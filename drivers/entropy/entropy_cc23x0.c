@@ -297,6 +297,11 @@ static int entropy_cc23x0_init(const struct device *dev)
 		/* Clear noise data array and retrieve RCL noise */
 		memset(rcl_noise, 0, noise_length);
 		rcl_status = get_rcl_noise(rcl_noise, CONFIG_ENTROPY_CC23X0_NOISE_INPUT_WORD_LENGTH);
+		if (rcl_status != 0) {
+			/* Noise capture failed: the buffer contents must not be used */
+			k_free(rcl_noise);
+			return -EIO;
+		}
 
 		if (CONFIG_ENTROPY_CC23X0_RCT_ENABLED || CONFIG_ENTROPY_CC23X0_APT_ENABLED) {
 			/* Perform Health Checks on the noise data before generating entropy */

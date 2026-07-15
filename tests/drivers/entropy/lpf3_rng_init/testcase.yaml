@@ -1,0 +1,8 @@
+tests:
+  drivers.entropy.lpf3_rng_init:
+    platform_allow:
+      - lp_em_cc2340r5
+      - lp_em_cc2745r10_q1/cc2745r10_q1
+    tags:
+      - drivers
+      - entropy
