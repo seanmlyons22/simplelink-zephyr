@@ -9,6 +9,8 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(dma_cc23x0_cc27xx, CONFIG_DMA_LOG_LEVEL);
 
+#include <string.h>
+
 #include <zephyr/device.h>
 #include <zephyr/drivers/dma.h>
 #include <zephyr/irq.h>
@@ -43,6 +45,14 @@ LOG_MODULE_REGISTER(dma_cc23x0_cc27xx, CONFIG_DMA_LOG_LEVEL);
 #define DMA_CC23X0_CC27XX_IS_ECH_CH(ch) ((ch) >= DMA_CC23X0_CC27XX_ECH_CH_MIN)
 
 /*
+ * Number of channels handled by this driver. On CC27xx the controller has 12
+ * channels (8 DCH + 4 ECH, TRM "12-channel configurable uDMA controller")
+ * even though the driverlib UDMA_NUM_CHANNELS constant only covers the DCH
+ * range there.
+ */
+#define DMA_CC23X0_CC27XX_NUM_CH (DMA_CC23X0_CC27XX_ECH_CH_MAX + 1)
+
+/*
  * In basic mode, the DMA controller performs transfers as long as there are more items
  * to transfer, and a transfer request is present. This mode is used with peripherals that
  * assert a DMA request signal whenever the peripheral is ready for a data transfer.
@@ -75,15 +85,17 @@ struct dma_cc23x0_cc27xx_channel {
 
 /* Alternate Control table entries are currently not supported */
 struct dma_cc23x0_cc27xx_data {
-	__aligned(1024) uDMAControlTableEntry desc[UDMA_NUM_CHANNELS];
-	struct dma_cc23x0_cc27xx_channel channels[UDMA_NUM_CHANNELS];
+	__aligned(1024) uDMAControlTableEntry desc[DMA_CC23X0_CC27XX_NUM_CH];
+	struct dma_cc23x0_cc27xx_channel channels[DMA_CC23X0_CC27XX_NUM_CH];
 };
 
 /*
- * If the channel is a software channel, then the completion will be signaled
- * on this DMA dedicated interrupt.
- * If a peripheral channel is used, then the completion will be signaled on the
- * peripheral's interrupt.
+ * If the channel is a software channel (ECH), then the completion is signaled
+ * on this DMA dedicated interrupt: the channel's DONEMASK bit is set at
+ * config time, which routes its done state to the combined uDMA done signal
+ * (TRM uDMA chapter, DONEMASK register).
+ * If a peripheral channel (DCH) is used, then the completion is signaled on
+ * the peripheral's interrupt, so those channels must not be handled here.
  */
 static void dma_cc23x0_cc27xx_isr(const struct device *dev)
 {
@@ -94,16 +106,16 @@ static void dma_cc23x0_cc27xx_isr(const struct device *dev)
 
 	done_flags = uDMAIntStatus();
 
-	for (i = 0; i < UDMA_NUM_CHANNELS; i++) {
-		if ((done_flags & BIT(i)) && !DMA_CC23X0_CC27XX_IS_ECH_CH(i)) {
+	for (i = 0; i < DMA_CC23X0_CC27XX_NUM_CH; i++) {
+		if ((done_flags & BIT(i)) && DMA_CC23X0_CC27XX_IS_ECH_CH(i)) {
 			LOG_DBG("DMA transfer completed on channel %d", i);
+
+			uDMAClearInt(done_flags & BIT(i));
 
 			ch_data = &data->channels[i];
 			if (ch_data->cb) {
 				ch_data->cb(dev, ch_data->user_data, i, DMA_STATUS_COMPLETE);
 			}
-
-			uDMAClearInt(done_flags & BIT(i));
 		}
 	}
 }
@@ -143,12 +155,12 @@ static int dma_cc23x0_cc27xx_config(const struct device *dev, uint32_t channel,
 	enum pm_device_state pm_state;
 #endif
 
-	if (channel >= UDMA_NUM_CHANNELS) {
+	if (channel >= DMA_CC23X0_CC27XX_NUM_CH) {
 		LOG_ERR("Invalid channel");
 		return -EINVAL;
 	}
 
-	if (config->dma_slot > EVTSVT_IPID_MAX_VAL) {
+	if (!DMA_CC23X0_CC27XX_IS_ECH_CH(channel) && config->dma_slot > EVTSVT_IPID_MAX_VAL) {
 		LOG_ERR("Invalid trigger");
 		return -EINVAL;
 	}
@@ -252,8 +264,15 @@ static int dma_cc23x0_cc27xx_config(const struct device *dev, uint32_t channel,
 	}
 
 	if (DMA_CC23X0_CC27XX_IS_ECH_CH(channel)) {
-		LOG_ERR("ECH channels are not supported");
-		return -ENOTSUP;
+		/*
+		 * Software (memory-to-memory) channel: no event trigger is
+		 * needed, the transfer is started with a software request.
+		 * Set the channel's DONEMASK bit so its done state raises the
+		 * combined uDMA done interrupt instead of being routed to a
+		 * peripheral (TRM uDMA chapter, DONEMASK register, reset 0).
+		 */
+		LOG_DBG("Using ECH Channel %d (software request)", channel);
+		HWREG(DMA_BASE + DMA_O_DONEMASK) |= BIT(channel);
 	} else {
 		/* Select peripheral */
 		LOG_DBG("Using DCH Channel %d with trigger %d", channel, config->dma_slot);
@@ -305,10 +324,8 @@ static int dma_cc23x0_cc27xx_config(const struct device *dev, uint32_t channel,
 
 static int dma_cc23x0_cc27xx_stop(const struct device *dev, uint32_t channel)
 {
-
-	if (DMA_CC23X0_CC27XX_IS_ECH_CH(channel)) {
-		LOG_ERR("ECH channels are not supported");
-		return -ENOTSUP;
+	if (channel >= DMA_CC23X0_CC27XX_NUM_CH) {
+		return -EINVAL;
 	}
 
 	uDMADisableChannel(BIT(channel));
@@ -320,17 +337,24 @@ static int dma_cc23x0_cc27xx_reload(const struct device *dev, uint32_t channel, 
 				    uint32_t dst, size_t size)
 {
 	struct dma_cc23x0_cc27xx_data *data = dev->data;
-	struct dma_cc23x0_cc27xx_channel *ch_data = &data->channels[channel];
-	uint32_t xfer_size = size / ch_data->data_size;
+	struct dma_cc23x0_cc27xx_channel *ch_data;
+	uint32_t xfer_size;
 
-	if (DMA_CC23X0_CC27XX_IS_ECH_CH(channel)) {
-		LOG_ERR("ECH channels are not supported");
-		return -ENOTSUP;
+	if (channel >= DMA_CC23X0_CC27XX_NUM_CH) {
+		return -EINVAL;
+	}
+
+	ch_data = &data->channels[channel];
+	if (!ch_data->data_size) {
+		/* Channel has never been configured */
+		return -EINVAL;
 	}
 
 	if (uDMAIsChannelEnabled(BIT(channel))) {
 		return -EBUSY;
 	}
+
+	xfer_size = size / ch_data->data_size;
 
 	uDMASetChannelTransfer(&data->desc[channel], DMA_CC23X0_CC27XX_MODE(channel), (void *)src,
 			       (void *)dst, xfer_size);
@@ -350,15 +374,27 @@ static int dma_cc23x0_cc27xx_reload(const struct device *dev, uint32_t channel, 
 static int dma_cc23x0_cc27xx_get_status(const struct device *dev, uint32_t channel,
 					struct dma_status *stat)
 {
+	struct dma_cc23x0_cc27xx_data *data = dev->data;
+	struct dma_cc23x0_cc27xx_channel *ch_data;
 	uint8_t ch_sel;
 
-	if (DMA_CC23X0_CC27XX_IS_ECH_CH(channel)) {
-		LOG_ERR("ECH channels are not supported");
-		return -ENOTSUP;
+	if (channel >= DMA_CC23X0_CC27XX_NUM_CH || !stat) {
+		return -EINVAL;
 	}
 
-	if (channel >= UDMA_NUM_CHANNELS || !stat) {
-		return -EINVAL;
+	memset(stat, 0, sizeof(*stat));
+
+	ch_data = &data->channels[channel];
+	stat->busy = uDMAIsChannelEnabled(BIT(channel));
+	if (ch_data->data_size) {
+		stat->pending_length = uDMAGetChannelSize(&data->desc[channel]) *
+				       ch_data->data_size;
+	}
+
+	if (DMA_CC23X0_CC27XX_IS_ECH_CH(channel)) {
+		/* Software channels only perform memory-to-memory transfers */
+		stat->dir = MEMORY_TO_MEMORY;
+		return 0;
 	}
 
 	ch_sel = DMA_CC23X0_CC27XX_CHXSEL_REG(channel) & EVTSVT_IPID_MAX_VAL;
@@ -387,6 +423,7 @@ static int dma_cc23x0_cc27xx_get_status(const struct device *dev, uint32_t chann
 		break;
 	case EVTSVT_DMA_TRIG_LRFDTRG:
 		stat->dir = MEMORY_TO_MEMORY;
+		break;
 	#endif
 	default:
 		stat->dir = MEMORY_TO_MEMORY;
@@ -398,10 +435,8 @@ static int dma_cc23x0_cc27xx_get_status(const struct device *dev, uint32_t chann
 
 static int dma_cc23x0_cc27xx_start(const struct device *dev, uint32_t channel)
 {
-
-	if (DMA_CC23X0_CC27XX_IS_ECH_CH(channel)) {
-		LOG_ERR("ECH channels are not supported");
-		return -ENOTSUP;
+	if (channel >= DMA_CC23X0_CC27XX_NUM_CH) {
+		return -EINVAL;
 	}
 
 	if (uDMAIsChannelEnabled(BIT(channel))) {
@@ -410,6 +445,15 @@ static int dma_cc23x0_cc27xx_start(const struct device *dev, uint32_t channel)
 
 	uDMAEnable();
 	uDMAEnableChannel(BIT(channel));
+
+	if (DMA_CC23X0_CC27XX_IS_ECH_CH(channel)) {
+		/*
+		 * Software channel in auto-request mode: a single software
+		 * request completes the whole transfer.
+		 */
+		uDMARequestChannel(BIT(channel));
+		return 0;
+	}
 
 	struct dma_status status;
 
