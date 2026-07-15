@@ -242,6 +242,13 @@ static int crypto_cc23xx_cc27xx_ecb_encrypt(struct cipher_ctx *ctx, struct ciphe
 
 	k_mutex_lock(&data->device_mutex, K_FOREVER);
 
+	/*
+	 * A previous operation that timed out can leave a completion that was
+	 * signaled after the timeout pending in the semaphore; drop it so this
+	 * operation does not proceed before its own completion.
+	 */
+	k_sem_reset(&data->op_done);
+
 	crypto_cc23xx_cc27xx_pm_policy_state_lock_get();
 
 	/* Enable interrupts */
@@ -420,6 +427,13 @@ static int crypto_cc23xx_cc27xx_ctr(struct cipher_ctx *ctx, struct cipher_pkt *p
 	}
 
 	k_mutex_lock(&data->device_mutex, K_FOREVER);
+
+	/*
+	 * A previous operation that timed out can leave a completion that was
+	 * signaled after the timeout pending in the semaphore; drop it so this
+	 * operation does not proceed before its own completion.
+	 */
+	k_sem_reset(&data->op_done);
 
 	crypto_cc23xx_cc27xx_pm_policy_state_lock_get();
 
@@ -616,6 +630,13 @@ static int crypto_cc23xx_cc27xx_cmac(struct cipher_ctx *ctx, struct cipher_pkt *
 	}
 
 	k_mutex_lock(&data->device_mutex, K_FOREVER);
+
+	/*
+	 * A previous operation that timed out can leave a completion that was
+	 * signaled after the timeout pending in the semaphore; drop it so this
+	 * operation does not proceed before its own completion.
+	 */
+	k_sem_reset(&data->op_done);
 
 	crypto_cc23xx_cc27xx_pm_policy_state_lock_get();
 
