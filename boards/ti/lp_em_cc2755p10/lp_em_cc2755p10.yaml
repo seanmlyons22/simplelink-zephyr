@@ -15,4 +15,5 @@ supported:
   - spi
   - watchdog
   - counter
+  - rtc
 vendor: ti
