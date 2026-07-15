@@ -28,6 +28,17 @@ LOG_MODULE_REGISTER(counter_cc23x0_lgpt, CONFIG_COUNTER_LOG_LEVEL);
 /* Prescaler register value - hardware divides by (TICKDIV + 1) */
 #define LGPT_CLK_PRESCALE(pres) ((pres) << 8)
 
+/*
+ * Map the LGPT instance base address to its clock gate. The devicetree
+ * instance number cannot be used for this: instance numbers are assigned
+ * to status "okay" nodes only, so e.g. with only lgpt3 enabled, instance
+ * 0 would wrongly select CLKCTL_LGPT0 and leave LGPT3 unclocked.
+ */
+#define LGPT_CLKCTL_FROM_BASE(base)                                            \
+	((base) == LGPT0_BASE ? CLKCTL_LGPT0 :                                 \
+	 (base) == LGPT1_BASE ? CLKCTL_LGPT1 :                                 \
+	 (base) == LGPT2_BASE ? CLKCTL_LGPT2 : CLKCTL_LGPT3)
+
 /* Number of capture/compare channels available per LGPT instance */
 #define LGPT_NUM_CHANNELS 3
 
@@ -460,7 +471,7 @@ static const struct counter_driver_api cc23x0_lgpt_api = {
 			.channels = LGPT_NUM_CHANNELS,						\
 		},										\
 		.base = DT_INST_REG_ADDR(inst),							\
-		.clk_idx = CLKCTL_LGPT##inst,							\
+		.clk_idx = LGPT_CLKCTL_FROM_BASE(DT_INST_REG_ADDR(inst)),			\
 		.prescale = DT_INST_PROP(inst, clk_prescale),					\
 	};											\
 												\
