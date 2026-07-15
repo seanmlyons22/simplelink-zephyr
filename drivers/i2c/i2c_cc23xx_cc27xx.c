@@ -774,7 +774,7 @@ static void i2c_cc23xx_cc27xx_controller_isr(const struct device *dev)
 	/* Clear the interrupt */
 	I2CControllerClearInt(config->base);
 
-	uint32_t status = HWREG(I2C0_BASE + I2C_O_CSTA);
+	uint32_t status = HWREG(config->base + I2C_O_CSTA);
 
 	/* Handle errors. ERR bit is not set if arbitration lost.
 	 * The I2C peripheral has an issue where the DATACK_N bit
