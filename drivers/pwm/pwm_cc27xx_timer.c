@@ -100,37 +100,29 @@ static void pwm_cc27xx_timer_set_initial_target(const struct pwm_cc27xx_timer_co
 }
 
 /*
- * Get the output enable bit for the given output index
- */
-static uint32_t pwm_cc27xx_timer_get_output_enable(uint8_t output_idx)
-{
-	switch (output_idx) {
-	case 0:
-		return LGPT_CxCFG_OUT0;
-	case 1:
-		return LGPT_CxCFG_OUT1;
-	case 2:
-		return LGPT_CxCFG_OUT2;
-	default:
-		return LGPT_CxCFG_OUT0;
-	}
-}
-
-/*
  * Set initial channel compare value.
- * Uses channel 0 registers but enables the correct output based on output_idx.
+ * Each output uses its own channel registers (channel n drives output n), so
+ * PWM instances sharing one LGPT do not clobber each other's compare value.
  */
 static void pwm_cc27xx_timer_set_initial_compare(const struct pwm_cc27xx_timer_config *config,
 					   uint32_t pulse, uint8_t capture_compare_action)
 {
-	uint32_t output_enable = pwm_cc27xx_timer_get_output_enable(config->output_idx);
+	switch (config->output_idx) {
+	case 0:
+		HWREG(config->base + LGPT_O_C0CC) = pulse;
+		HWREG(config->base + LGPT_O_C0CFG) = LGPT_CxCFG_OUT0 | capture_compare_action;
+		break;
+	case 1:
+		HWREG(config->base + LGPT_O_C1CC) = pulse;
+		HWREG(config->base + LGPT_O_C1CFG) = LGPT_CxCFG_OUT1 | capture_compare_action;
+		break;
+	case 2:
+		HWREG(config->base + LGPT_O_C2CC) = pulse;
+		HWREG(config->base + LGPT_O_C2CFG) = LGPT_CxCFG_OUT2 | capture_compare_action;
+		break;
+	}
 
-	/* Always use channel 0 registers (C0CC, C0CFG) but enable correct output */
-	HWREG(config->base + LGPT_O_C0CC) = pulse;
-	HWREG(config->base + LGPT_O_C0CFG) = output_enable | capture_compare_action;
-
-	LOG_DBG("C0CFG = 0x%x (output_idx=%d, ccact=0x%x)",
-		output_enable | capture_compare_action, config->output_idx,
+	LOG_DBG("CnCFG (output_idx=%d, ccact=0x%x)", config->output_idx,
 		capture_compare_action);
 }
 
@@ -143,8 +135,18 @@ static void pwm_cc27xx_timer_set_next_target(const struct pwm_cc27xx_timer_confi
 static void pwm_cc27xx_timer_set_next_compare(const struct pwm_cc27xx_timer_config *config,
 					uint32_t pulse)
 {
-	/* Always use channel 0 pipeline register */
-	HWREG(config->base + LGPT_O_PC0CC) = pulse;
+	/* Pipeline register of the channel driving this output */
+	switch (config->output_idx) {
+	case 0:
+		HWREG(config->base + LGPT_O_PC0CC) = pulse;
+		break;
+	case 1:
+		HWREG(config->base + LGPT_O_PC1CC) = pulse;
+		break;
+	case 2:
+		HWREG(config->base + LGPT_O_PC2CC) = pulse;
+		break;
+	}
 }
 
 /*
