@@ -544,6 +544,13 @@ static int adc_lpf3_init(const struct device *dev)
 	/* Enable clock */
 	CLKCTLEnable(CLKCTL_BASE, CLKCTL_ADC0);
 
+	/* Increase settling time for the comparator output to reduce the
+	 * error rate of ADC conversions ('sparkle codes'). This is the
+	 * workaround for ADC errata ADC_09 (CC2340R5 / CC27xx), applied by
+	 * the TI SDK in ADCLPF3.c.
+	 */
+	ADCIncreaseComparatorSettlingTime();
+
 	/* Enable interrupts */
 	ADCEnableInterrupt(ADC_LPF3_INT_MASK);
 
@@ -571,6 +578,13 @@ static int adc_lpf3_pm_action(const struct device *dev, enum pm_device_action ac
 		return 0;
 	case PM_DEVICE_ACTION_RESUME:
 		CLKCTLEnable(CLKCTL_BASE, CLKCTL_ADC0);
+
+		/* Re-apply the ADC_09 errata workaround: the DEBUG1 register
+		 * is in the peripheral power domain and loses its value when
+		 * the domain is powered down in standby.
+		 */
+		ADCIncreaseComparatorSettlingTime();
+
 		ADCEnableInterrupt(ADC_LPF3_INT_MASK);
 
 		/* Restore context for the channels that were configured before */
