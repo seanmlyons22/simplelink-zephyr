@@ -29,6 +29,10 @@
 
 #include <inc/hw_memmap.h>
 
+#ifdef CONFIG_PM
+#include <ti/drivers/Power.h>
+#endif
+
 #ifdef CONFIG_UART_LPF3_DMA_DRIVEN
 #include <driverlib/udma.h>
 
@@ -105,6 +109,9 @@ struct uart_lpf3_data {
 #endif /* CONFIG_UART_LPF3_DMA_DRIVEN */
 #ifdef CONFIG_PM_DEVICE
 	ATOMIC_DEFINE(pm_lock, UART_LPF3_PM_LOCK_COUNT);
+#endif
+#ifdef CONFIG_PM
+	Power_NotifyObj pm_notify;
 #endif
 };
 
@@ -1219,6 +1226,29 @@ static int uart_lpf3_init_common(const struct device *dev)
 	return uart_lpf3_configure(dev, &data->uart_config);
 }
 
+#ifdef CONFIG_PM
+/*
+ * Standby powers down the peripheral domain: the UART's non-retained registers
+ * (baud, line control, FIFO, DMA/interrupt config) are lost and must be
+ * reprogrammed on wakeup -- mirrors the TI SDK UART2LPF3 AWAKE_STANDBY notify.
+ * The PM_DEVICE resume action only runs for system-managed device PM; this
+ * covers the configs where the device is not suspended around standby (e.g.
+ * CONFIG_PM_DEVICE_RUNTIME), where the console/DUT UART would otherwise be
+ * dead after the first standby cycle. init_common() is the same restore path
+ * PM_DEVICE_ACTION_RESUME uses (pinctrl/IOC is retained across standby).
+ */
+static int_fast16_t uart_lpf3_awake_notify(uint_fast16_t event_type, uintptr_t event_arg,
+					   uintptr_t client_arg)
+{
+	ARG_UNUSED(event_type);
+	ARG_UNUSED(event_arg);
+
+	(void)uart_lpf3_init_common((const struct device *)client_arg);
+
+	return Power_NOTIFYDONE;
+}
+#endif /* CONFIG_PM */
+
 #define UART_LPF3_INIT_FUNC(n)									\
 	static int uart_lpf3_init_##n(const struct device *dev)					\
 	{											\
@@ -1234,6 +1264,10 @@ static int uart_lpf3_init_common(const struct device *dev)
 		if (ret) {									\
 			return ret;								\
 		}										\
+												\
+		IF_ENABLED(CONFIG_PM, (						                \
+			Power_registerNotify(&data->pm_notify, PowerLPF3_AWAKE_STANDBY,	        \
+					     uart_lpf3_awake_notify, (uintptr_t)dev);))		\
 												\
 		/* Enable interrupts */								\
 		UART_LPF3_IRQ_CFG(n);								\
