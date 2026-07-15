@@ -445,6 +445,21 @@ static int uart_lpf3_irq_is_pending(const struct device *dev)
 	/* Read masked interrupt status */
 	uint32_t status = UARTIntStatus(config->reg, true);
 
+	/*
+	 * The TX FIFO-level interrupt is transition-triggered on this UART: it
+	 * does not stay asserted while the FIFO merely sits at/below the
+	 * watermark, so MIS.TX reads 0 at steady empty even though the callback
+	 * could send (uart_irq_tx_enable() bootstraps via NVIC_SetPendingIRQ for
+	 * exactly this reason). Surface TX-ready explicitly whenever the TX
+	 * interrupt is enabled, so a callback gated on `while
+	 * (uart_irq_is_pending())` -- the common Zephyr idiom -- actually starts
+	 * transmitting instead of exiting immediately and never filling the FIFO.
+	 */
+	if ((HWREG(config->reg + UART_O_IMSC) & UART_INT_TX) &&
+	    UARTSpaceAvailable(config->reg)) {
+		return 1;
+	}
+
 	return status ? 1 : 0;
 }
 
