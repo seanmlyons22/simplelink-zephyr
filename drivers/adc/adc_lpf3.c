@@ -112,6 +112,16 @@ static void adc_context_start_sampling(struct adc_context *ctx)
 #ifdef CONFIG_ADC_LPF3_DMA_DRIVEN
 	const struct adc_lpf3_config *cfg = data->dev->config;
 
+	/*
+	 * A single ADC trigger event must move the whole block. The DMA
+	 * driver programs the burst length as the uDMA arbitration size,
+	 * which must be a power of two, so round the channel count up.
+	 * The controller transfers min(arbitration size, items remaining)
+	 * per burst request (TRM 15.3.4.2), so the round-up is safe for
+	 * non-power-of-two channel counts (e.g. 3 channels).
+	 */
+	uint32_t burst_len = sizeof(*data->buffer) * BIT(LOG2CEIL(data->ch_count));
+
 	struct dma_block_config block_cfg = {
 		.source_address = ADC_LPF3_REG_GET(ADC_O_MEMRES0),
 		.dest_address = (uint32_t)(data->buffer),
@@ -127,8 +137,8 @@ static void adc_context_start_sampling(struct adc_context *ctx)
 		.head_block = &block_cfg,
 		.source_data_size = sizeof(uint32_t),
 		.dest_data_size = sizeof(*data->buffer),
-		.source_burst_length = block_cfg.block_size,
-		.dest_burst_length = block_cfg.block_size,
+		.source_burst_length = burst_len,
+		.dest_burst_length = burst_len,
 		.dma_callback = NULL,
 		.user_data = NULL,
 	};
