@@ -135,8 +135,11 @@ ssize_t z_impl_hwinfo_get_device_id(uint8_t *buffer, size_t length)
 /* The 64 bit mac address in fcfg is the EUI64 */
 int z_impl_hwinfo_get_device_eui64(uint8_t *buffer)
 {
-
-	memcpy(buffer, &(fcfg->deviceInfo.macAddr), EUI64_SIZE);
+	/* FCFG stores the address least-significant byte first (the TI SDK
+	 * copies it directly into ZBOSS little-endian IEEE addresses).
+	 * hwinfo returns EUI64 most-significant byte first, so swap.
+	 */
+	sys_memcpy_swap(buffer, fcfg->deviceInfo.macAddr, EUI64_SIZE);
 
 	return 0;
 }
