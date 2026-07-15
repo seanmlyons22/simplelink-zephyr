@@ -1085,7 +1085,14 @@ static int crypto_cc23xx_cc27xx_ccm_decrypt(struct cipher_ctx *ctx, struct ciphe
 	 */
 	LOG_DBG("Check tag");
 
-	if (!memcmp(enc_tag, aead_op->tag, tag_len)) {
+	uint8_t diff = 0;
+
+	/* Constant-time comparison: no early exit on the first differing byte */
+	for (i = 0; i < tag_len; i++) {
+		diff |= enc_tag[i] ^ aead_op->tag[i];
+	}
+
+	if (diff == 0U) {
 		return 0;
 	}
 
