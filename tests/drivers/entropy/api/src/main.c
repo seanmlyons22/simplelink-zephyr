@@ -109,6 +109,34 @@ ZTEST(entropy_api, test_entropy_get_entropy)
 	zassert_true(get_entropy() == TC_PASS);
 }
 
+/*
+ * Entropy drivers must serve repeated requests indefinitely. Regression
+ * test: the TI CC23x0/CC27xx driver served a finite pool generated once at
+ * boot and then failed every subsequent call, silently starving CSPRNG
+ * reseeds and Bluetooth pairing.
+ */
+ZTEST(entropy_api, test_entropy_get_entropy_repeated)
+{
+	const struct device *const dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_entropy));
+	static uint8_t prev[64];
+	static uint8_t cur[64];
+
+	zassert_true(device_is_ready(dev), "entropy device not ready");
+
+	zassert_ok(entropy_get_entropy(dev, prev, sizeof(prev)),
+		   "initial entropy request failed");
+
+	/* Drain well past any boot-time pool (64 * 64 B = 4 KiB) */
+	for (int i = 0; i < 64; i++) {
+		memset(cur, 0, sizeof(cur));
+		zassert_ok(entropy_get_entropy(dev, cur, sizeof(cur)),
+			   "entropy request %d failed", i);
+		zassert_true(memcmp(cur, prev, sizeof(cur)) != 0,
+			     "entropy request %d returned identical data", i);
+		memcpy(prev, cur, sizeof(prev));
+	}
+}
+
 void *entropy_api_setup(void)
 {
 #ifdef CONFIG_BT

@@ -13,7 +13,11 @@
 #include <string.h>
 
 #include <zephyr/sys/sys_io.h>
+#include <zephyr/sys/util.h>
 #include <driverlib/hapi.h>
+
+#include <tinycrypt/ctr_prng.h>
+#include <tinycrypt/constants.h>
 
 #if DT_NUM_INST_STATUS_OKAY(DT_DRV_COMPAT) == 0
 #error "Entropy Driver for CC23x0 requires at least one instance"
@@ -43,6 +47,14 @@ extern int_fast16_t RCL_AdcNoise_get_samples_blocking(uint32_t *buffer, uint32_t
 /* Entropy buffer needs to be 32-bit aligned for the SHA2 operation. */
 static uint8_t __aligned(4) entropy[CONFIG_ENTROPY_CC23X0_ENTROPY_BYTE_LENGTH];
 static uint16_t entropy_pool_level;
+
+/* Radio noise can only be sampled while the radio is unused, so the pool
+ * cannot be refilled from the noise source at runtime. Like the TI SDK RNG
+ * driver (RNGLPF3RF), a CTR-DRBG (SP 800-90A, AES-128) seeded from the boot
+ * noise serves requests once the pool is exhausted.
+ */
+static TCCtrPrng_t prng_ctx;
+static K_MUTEX_DEFINE(entropy_lock);
 
 static int_fast16_t get_rcl_noise(uint32_t *local_noise_input, uint16_t noise_len)
 {
@@ -251,20 +263,28 @@ static int entropy_cc23x0_get_entropy(const struct device *dev,
 					     uint16_t len)
 {
 	int ret_status = 0;
+	uint16_t chunk;
 
-	if (len > entropy_pool_level) {
-		ret_status = -EPERM;
-	} else {
-		if ((len > 0) && (entropy_pool_level > 0)) {
-			/* Copy entropy generated to the buffer */
-			memcpy(buf, &entropy[entropy_pool_level-len], len);
-			memset(&entropy[entropy_pool_level-len], 0, len);
-			entropy_pool_level -= len;
-		} else {
-			/* Invalid length */
-			ret_status = -EPERM;
-		}
+	k_mutex_lock(&entropy_lock, K_FOREVER);
+
+	/* Serve the conditioned boot noise first, then fall back to the
+	 * CTR-DRBG it seeded.
+	 */
+	if ((len > 0) && (entropy_pool_level > 0)) {
+		chunk = MIN(len, entropy_pool_level);
+		memcpy(buf, &entropy[entropy_pool_level - chunk], chunk);
+		memset(&entropy[entropy_pool_level - chunk], 0, chunk);
+		entropy_pool_level -= chunk;
+		buf += chunk;
+		len -= chunk;
 	}
+
+	if ((len > 0) &&
+	    (tc_ctr_prng_generate(&prng_ctx, NULL, 0, buf, len) != TC_CRYPTO_SUCCESS)) {
+		ret_status = -EIO;
+	}
+
+	k_mutex_unlock(&entropy_lock);
 
 	return ret_status;
 }
@@ -325,6 +345,21 @@ static int entropy_cc23x0_init(const struct device *dev)
 		}
 	}
 	k_free(rcl_noise);
+
+	/* Seed the CTR-DRBG with 32 bytes of the pool (consumed, never handed
+	 * out directly) so requests can be served after the pool is drained.
+	 * As in the TI SDK, the DRBG is never reseeded (RNGLPF3RF.c sets
+	 * reseedInterval to UINT32_MAX); TinyCrypt's 2^48-request limit is
+	 * unreachable in practice.
+	 */
+	entropy_pool_level -= TC_AES_KEY_SIZE + TC_AES_BLOCK_SIZE;
+	if (tc_ctr_prng_init(&prng_ctx, &entropy[entropy_pool_level],
+			     TC_AES_KEY_SIZE + TC_AES_BLOCK_SIZE, NULL, 0) != TC_CRYPTO_SUCCESS) {
+		entropy_pool_level = 0;
+		return -EIO;
+	}
+	memset(&entropy[entropy_pool_level], 0, TC_AES_KEY_SIZE + TC_AES_BLOCK_SIZE);
+
 	return 0;
 }
 

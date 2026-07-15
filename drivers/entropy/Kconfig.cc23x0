@@ -8,11 +8,15 @@ config ENTROPY_CC23X0_RNG
 	default y
 	depends on DT_HAS_TI_CC23X0_RNG_ENABLED
 	select ENTROPY_HAS_DRIVER
+	select TINYCRYPT
+	select TINYCRYPT_AES
+	select TINYCRYPT_CTR_PRNG
 	help
 	  This option enables the driver for the Random Number Generator (RNG)
 	  for TI SimpleLink CC23x0 SoCs. This uses noise from Radio during startup
-	  to generate entropy. Subsequent calls to this API will fail and it
-	  returns with an error code.
+	  to generate entropy. Since Radio noise cannot be sampled again once the
+	  Radio is in use, the startup noise also seeds an AES-128 CTR-DRBG
+	  (SP 800-90A) which serves requests after the startup entropy is consumed.
 
 if ENTROPY_CC23X0_RNG
 
