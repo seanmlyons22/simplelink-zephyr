@@ -218,7 +218,10 @@ static int gpio_cc23x0xx_pin_interrupt_configure(const struct device *port, gpio
 		GPIODisableEventDio(pin);
 
 	} else if (mode == GPIO_INT_MODE_EDGE) {
-		switch (trig) {
+		/* WUENSB (standby wake) is always armed for edge interrupts below,
+		 * so the GPIO_INT_WAKEUP trigger modifier is implicitly satisfied.
+		 */
+		switch (trig & ~GPIO_INT_TRIG_WAKE) {
 		case GPIO_INT_TRIG_LOW:
 			config |= IOC_IOC0_EDGEDET_EDGE_NEG;
 			break;
