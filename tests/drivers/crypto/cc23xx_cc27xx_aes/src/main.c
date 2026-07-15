@@ -371,6 +371,23 @@ ZTEST(crypto_lpf3_aes, test_ccm_empty_payload)
 		   "CCM auth-only decrypt failed");
 }
 
+/*
+ * nonce_len = 13 leaves a 2-byte B0 length field (L = 15 - nonce_len),
+ * so a message longer than 65535 bytes cannot be encoded per RFC 3610
+ * and must be rejected up front. Without the check the length is
+ * silently truncated in B0 (wrong tag) and the driver walks in_len
+ * bytes of memory (here: far past the 16-byte buffer).
+ */
+ZTEST(crypto_lpf3_aes, test_ccm_msg_len_exceeds_len_field)
+{
+	uint8_t buf[16];
+	uint8_t tag[8];
+
+	zassert_not_equal(ccm_op(CRYPTO_CIPHER_OP_ENCRYPT, buf, 65536 + 16, buf,
+				 65536 + 16, tag),
+			  0, "oversized CCM msg_len must be rejected");
+}
+
 ZTEST(crypto_lpf3_aes, test_ccm_tag_mismatch)
 {
 	uint8_t out[23] = {0};

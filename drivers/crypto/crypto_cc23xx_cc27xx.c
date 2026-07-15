@@ -850,6 +850,15 @@ static int crypto_cc23xx_cc27xx_ccm_check_param(struct cipher_ctx *ctx,
 		return -EINVAL;
 	}
 
+	/* The message length must be encodable in the B0 length field (RFC 3610) */
+	uint8_t len_size = AES_BLOCK_SIZE - nonce_len - 1;
+
+	if (len_size < sizeof(uint32_t) &&
+	    ((uint32_t)aead_op->pkt->in_len >> (len_size << 3)) != 0) {
+		LOG_ERR("CCM parameter invalid (msg_len does not fit in %d bytes)", len_size);
+		return -EINVAL;
+	}
+
 	return 0;
 }
 
