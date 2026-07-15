@@ -151,16 +151,17 @@ static int ctr_op(enum cipher_op op, uint8_t *in, int in_len, uint8_t *out, int 
 	return ret;
 }
 
-static int ccm_op(enum cipher_op op, uint8_t *in, int in_len, uint8_t *out, int out_max,
-		  uint8_t *tag)
+static int ccm_run(enum cipher_op op, uint8_t *nonce, uint16_t nonce_len, uint16_t tag_len,
+		   uint8_t *ad, uint32_t ad_len, uint8_t *in, int in_len, uint8_t *out,
+		   int out_max, uint8_t *tag)
 {
 	struct cipher_ctx ctx = {
 		.keylen = sizeof(ccm_key),
 		.key.bit_stream = (uint8_t *)ccm_key,
 		.flags = CAP_FLAGS,
 		.mode_params.ccm_info = {
-			.nonce_len = sizeof(ccm_nonce),
-			.tag_len = 8,
+			.nonce_len = nonce_len,
+			.tag_len = tag_len,
 		},
 	};
 	struct cipher_pkt pkt = {
@@ -170,8 +171,8 @@ static int ccm_op(enum cipher_op op, uint8_t *in, int in_len, uint8_t *out, int 
 		.out_buf_max = out_max,
 	};
 	struct cipher_aead_pkt aead = {
-		.ad = (uint8_t *)ccm_hdr,
-		.ad_len = sizeof(ccm_hdr),
+		.ad = ad,
+		.ad_len = ad_len,
 		.pkt = &pkt,
 		.tag = tag,
 	};
@@ -181,11 +182,18 @@ static int ccm_op(enum cipher_op op, uint8_t *in, int in_len, uint8_t *out, int 
 					CRYPTO_CIPHER_MODE_CCM, op),
 		   "CCM session setup failed");
 
-	ret = cipher_ccm_op(&ctx, &aead, (uint8_t *)ccm_nonce);
+	ret = cipher_ccm_op(&ctx, &aead, nonce);
 
 	cipher_free_session(dev, &ctx);
 
 	return ret;
+}
+
+static int ccm_op(enum cipher_op op, uint8_t *in, int in_len, uint8_t *out, int out_max,
+		  uint8_t *tag)
+{
+	return ccm_run(op, (uint8_t *)ccm_nonce, sizeof(ccm_nonce), 8, (uint8_t *)ccm_hdr,
+		       sizeof(ccm_hdr), in, in_len, out, out_max, tag);
 }
 
 ZTEST(crypto_lpf3_aes, test_ecb_single_block_kat)
@@ -407,6 +415,181 @@ ZTEST(crypto_lpf3_aes, test_ccm_tag_mismatch)
 	for (size_t i = 0; i < sizeof(back); i++) {
 		zassert_equal(back[i], 0, "output must be zeroed on auth failure");
 	}
+}
+
+/* --- Boundary and rejection coverage (deep-rescan pass) --- */
+
+ZTEST(crypto_lpf3_aes, test_reject_unsupported_modes)
+{
+	struct cipher_ctx ctx = {
+		.keylen = sizeof(kat_key),
+		.key.bit_stream = (uint8_t *)kat_key,
+		.flags = CAP_FLAGS,
+	};
+
+	/* GCM and CBC are not implemented by this driver */
+	zassert_equal(cipher_begin_session(dev, &ctx, CRYPTO_CIPHER_ALGO_AES,
+					   CRYPTO_CIPHER_MODE_GCM, CRYPTO_CIPHER_OP_ENCRYPT),
+		      -ENOTSUP, "GCM must be rejected");
+	zassert_equal(cipher_begin_session(dev, &ctx, CRYPTO_CIPHER_ALGO_AES,
+					   CRYPTO_CIPHER_MODE_CBC, CRYPTO_CIPHER_OP_ENCRYPT),
+		      -ENOTSUP, "CBC must be rejected");
+	/* The LAES engine cannot decrypt ECB */
+	zassert_equal(cipher_begin_session(dev, &ctx, CRYPTO_CIPHER_ALGO_AES,
+					   CRYPTO_CIPHER_MODE_ECB, CRYPTO_CIPHER_OP_DECRYPT),
+		      -ENOTSUP, "ECB decrypt must be rejected");
+}
+
+ZTEST(crypto_lpf3_aes, test_reject_bad_key)
+{
+	struct cipher_ctx ctx = {
+		.keylen = 32, /* AES-256 not supported by LAES128 */
+		.key.bit_stream = (uint8_t *)kat_key,
+		.flags = CAP_FLAGS,
+	};
+
+	zassert_equal(cipher_begin_session(dev, &ctx, CRYPTO_CIPHER_ALGO_AES,
+					   CRYPTO_CIPHER_MODE_ECB, CRYPTO_CIPHER_OP_ENCRYPT),
+		      -ENOTSUP, "256-bit key must be rejected");
+
+	ctx.keylen = 16;
+	ctx.key.bit_stream = NULL;
+	zassert_equal(cipher_begin_session(dev, &ctx, CRYPTO_CIPHER_ALGO_AES,
+					   CRYPTO_CIPHER_MODE_ECB, CRYPTO_CIPHER_OP_ENCRYPT),
+		      -EINVAL, "NULL key must be rejected");
+}
+
+ZTEST(crypto_lpf3_aes, test_ccm_aad_max)
+{
+	/* nonce_len 13 -> max single-block AAD = 14 bytes */
+	static uint8_t ad14[14] = {
+		0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16,
+		0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+	};
+	static const uint8_t expected[31] = {
+		0x58, 0x8c, 0x97, 0x9a, 0x61, 0xc6, 0x63, 0xd2,
+		0xf0, 0x66, 0xd0, 0xc2, 0xc0, 0xf9, 0x89, 0x80,
+		0x6d, 0x5f, 0x6b, 0x61, 0xda, 0xc3, 0x84, /* ct */
+		0x85, 0x8e, 0x20, 0xfc, 0x8f, 0xf1, 0x82, 0x0a, /* tag */
+	};
+	uint8_t out[23] = {0};
+	uint8_t tag[8] = {0};
+
+	zassert_ok(ccm_run(CRYPTO_CIPHER_OP_ENCRYPT, (uint8_t *)ccm_nonce, 13, 8, ad14,
+			   sizeof(ad14), (uint8_t *)ccm_data, sizeof(ccm_data), out,
+			   sizeof(out), tag),
+		   "CCM max-AAD encrypt failed");
+	zassert_mem_equal(out, expected, sizeof(ccm_data), "CCM max-AAD ciphertext mismatch");
+	zassert_mem_equal(tag, &expected[sizeof(ccm_data)], sizeof(tag),
+			  "CCM max-AAD tag mismatch");
+}
+
+ZTEST(crypto_lpf3_aes, test_ccm_nonce_min)
+{
+	/* nonce_len 7 (min) -> len_size 8 */
+	static uint8_t nonce7[7] = {0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16};
+	static const uint8_t expected[31] = {
+		0x02, 0x25, 0x23, 0x61, 0x9b, 0x4c, 0xe8, 0x8b,
+		0xf8, 0xa6, 0xb0, 0x5f, 0x73, 0x24, 0xeb, 0xca,
+		0x10, 0x3c, 0x16, 0xc3, 0x3a, 0xd1, 0xd5, /* ct */
+		0xb0, 0x1e, 0x8e, 0x56, 0x46, 0x34, 0x6b, 0x1e, /* tag */
+	};
+	uint8_t out[23] = {0};
+	uint8_t tag[8] = {0};
+
+	zassert_ok(ccm_run(CRYPTO_CIPHER_OP_ENCRYPT, nonce7, sizeof(nonce7), 8, (uint8_t *)ccm_hdr,
+			   sizeof(ccm_hdr), (uint8_t *)ccm_data, sizeof(ccm_data), out,
+			   sizeof(out), tag),
+		   "CCM min-nonce encrypt failed");
+	zassert_mem_equal(out, expected, sizeof(ccm_data), "CCM min-nonce ciphertext mismatch");
+	zassert_mem_equal(tag, &expected[sizeof(ccm_data)], sizeof(tag),
+			  "CCM min-nonce tag mismatch");
+}
+
+ZTEST(crypto_lpf3_aes, test_ccm_reject_bad_params)
+{
+	uint8_t buf[23] = {0};
+	uint8_t tag[8] = {0};
+	uint8_t ad15[15] = {0};
+
+	/* AAD larger than a single B1 block (14 bytes) */
+	zassert_not_equal(ccm_run(CRYPTO_CIPHER_OP_ENCRYPT, (uint8_t *)ccm_nonce, 13, 8, ad15,
+				  sizeof(ad15), buf, sizeof(buf), buf, sizeof(buf), tag),
+			  0, "oversized AAD must be rejected");
+
+	/* nonce_len below min (7) and above max (13) */
+	zassert_not_equal(ccm_run(CRYPTO_CIPHER_OP_ENCRYPT, buf, 6, 8, (uint8_t *)ccm_hdr,
+				  sizeof(ccm_hdr), buf, sizeof(buf), buf, sizeof(buf), tag),
+			  0, "nonce_len 6 must be rejected");
+	zassert_not_equal(ccm_run(CRYPTO_CIPHER_OP_ENCRYPT, buf, 14, 8, (uint8_t *)ccm_hdr,
+				  sizeof(ccm_hdr), buf, sizeof(buf), buf, sizeof(buf), tag),
+			  0, "nonce_len 14 must be rejected");
+
+	/* odd / out-of-range tag lengths */
+	zassert_not_equal(ccm_run(CRYPTO_CIPHER_OP_ENCRYPT, (uint8_t *)ccm_nonce, 13, 7,
+				  (uint8_t *)ccm_hdr, sizeof(ccm_hdr), buf, sizeof(buf), buf,
+				  sizeof(buf), tag),
+			  0, "odd tag_len must be rejected");
+}
+
+ZTEST(crypto_lpf3_aes, test_session_reuse_no_free)
+{
+	uint8_t out1[64] = {0};
+	uint8_t out2[64] = {0};
+	struct cipher_ctx ctx = {
+		.keylen = sizeof(kat_key),
+		.key.bit_stream = (uint8_t *)kat_key,
+		.flags = CAP_FLAGS,
+	};
+	struct cipher_pkt pkt1 = {
+		.in_buf = (uint8_t *)kat_plaintext,
+		.in_len = sizeof(kat_plaintext),
+		.out_buf = out1,
+		.out_buf_max = sizeof(out1),
+	};
+	struct cipher_pkt pkt2 = {
+		.in_buf = (uint8_t *)kat_plaintext,
+		.in_len = sizeof(kat_plaintext),
+		.out_buf = out2,
+		.out_buf_max = sizeof(out2),
+	};
+
+	zassert_ok(cipher_begin_session(dev, &ctx, CRYPTO_CIPHER_ALGO_AES,
+					CRYPTO_CIPHER_MODE_ECB, CRYPTO_CIPHER_OP_ENCRYPT));
+
+	/* Two ops on one session without an intervening free */
+	zassert_ok(cipher_block_op(&ctx, &pkt1), "first op failed");
+	zassert_ok(cipher_block_op(&ctx, &pkt2), "second op failed");
+
+	cipher_free_session(dev, &ctx);
+
+	zassert_mem_equal(out1, ecb_ciphertext, sizeof(ecb_ciphertext), "reuse op1 mismatch");
+	zassert_mem_equal(out2, ecb_ciphertext, sizeof(ecb_ciphertext), "reuse op2 mismatch");
+}
+
+ZTEST(crypto_lpf3_aes, test_two_sessions_interleaved)
+{
+	/* Two live sessions, ops interleaved: no HW state may leak between them */
+	uint8_t ecb_out[64] = {0};
+	uint8_t ctr_out[64] = {0};
+	uint8_t ctr_back[64] = {0};
+
+	zassert_ok(ecb_encrypt((uint8_t *)kat_plaintext, sizeof(kat_plaintext), ecb_out,
+			       sizeof(ecb_out)),
+		   "ECB in interleave failed");
+	zassert_ok(ctr_op(CRYPTO_CIPHER_OP_ENCRYPT, (uint8_t *)kat_plaintext,
+			  sizeof(kat_plaintext), ctr_out, sizeof(ctr_out)),
+		   "CTR in interleave failed");
+	zassert_ok(ecb_encrypt((uint8_t *)kat_plaintext, sizeof(kat_plaintext), ecb_out,
+			       sizeof(ecb_out)),
+		   "ECB #2 in interleave failed");
+	zassert_ok(ctr_op(CRYPTO_CIPHER_OP_DECRYPT, ctr_out, sizeof(ctr_out), ctr_back,
+			  sizeof(ctr_back)),
+		   "CTR decrypt in interleave failed");
+
+	zassert_mem_equal(ecb_out, ecb_ciphertext, sizeof(ecb_ciphertext), "interleave ECB");
+	zassert_mem_equal(ctr_out, ctr_ciphertext, sizeof(ctr_ciphertext), "interleave CTR");
+	zassert_mem_equal(ctr_back, kat_plaintext, sizeof(kat_plaintext), "interleave CTR back");
 }
 
 static void *crypto_setup(void)
