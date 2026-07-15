@@ -37,9 +37,6 @@ LOG_MODULE_REGISTER(wdt_ti_lpf3, CONFIG_WDT_LOG_LEVEL);
 #define WDT_STALL_ENABLE(_base) (HWREG((_base) + CKMD_O_WDTTEST) = 0x1)
 #define WDT_STALL_DISABLE(_base) (HWREG((_base) + CKMD_O_WDTTEST) = 0x0)
 
-/* No explicit control register in CC23X0 */
-#define WDT_HAS_CTL_REG 0
-
 #elif defined(CONFIG_SOC_SERIES_CC27XX)
 /* CC27XX register access macros */
 #define WDT_UNLOCK(_base)       (HWREG((_base) + CKMD_O_LOCK) = 0x1ACCE551)
@@ -47,14 +44,6 @@ LOG_MODULE_REGISTER(wdt_ti_lpf3, CONFIG_WDT_LOG_LEVEL);
 #define WDT_FEED(_base, _value) (HWREG((_base) + CKMD_O_CNT) = (_value))
 #define WDT_STALL_ENABLE(_base) (HWREG((_base) + CKMD_O_TEST) = 0x1)
 #define WDT_STALL_DISABLE(_base) (HWREG((_base) + CKMD_O_TEST) = 0x0)
-
-/* Define constants for reset bit in the watchdog control register */
-#define WDT_HAS_CTL_REG 1
-#define WDT_CTL_REG_OFFSET CKMD_O_CTL
-#define WDT_CTL_RSTEN_BIT (1U << 1) /* Reset enable is bit 1 */
-#define WDT_CTL_EN_BIT    (1U << 0) /* Watchdog enable is bit 0 */
-#define WDT_WRITE_CTL(_base, _value) (HWREG((_base) + WDT_CTL_REG_OFFSET) = (_value))
-#define WDT_GET_CTL(_base) (HWREG((_base) + WDT_CTL_REG_OFFSET))
 #endif
 
 /* Common timing constants for both chip families */
@@ -71,7 +60,6 @@ LOG_MODULE_REGISTER(wdt_ti_lpf3, CONFIG_WDT_LOG_LEVEL);
 struct wdt_ti_lpf3_data {
 	uint8_t enabled;
 	uint32_t reload;
-	uint8_t flags;
 };
 
 struct wdt_ti_lpf3_config {
@@ -102,8 +90,14 @@ static int wdt_ti_lpf3_install_timeout(const struct device *dev,
 		return -ENOTSUP;
 	}
 
+	/* The WDT unconditionally generates a system reset on timeout and
+	 * cannot be stopped once started (TRM 6.7.1, both families).
+	 */
+	if ((cfg->flags & WDT_FLAG_RESET_MASK) != WDT_FLAG_RESET_SOC) {
+		return -ENOTSUP;
+	}
+
 	data->reload = WDT_MS_TO_TICKS(cfg->window.max);
-	data->flags = cfg->flags;
 
 	LOG_DBG("raw reload value: %d", data->reload);
 
@@ -120,6 +114,13 @@ static int wdt_ti_lpf3_setup(const struct device *dev, uint8_t options)
 		return -EBUSY;
 	}
 
+	/* The WDT counts LFCLK, which keeps running in standby: the counter
+	 * cannot pause in sleep (TRM 6.7.1).
+	 */
+	if (options & WDT_OPT_PAUSE_IN_SLEEP) {
+		return -ENOTSUP;
+	}
+
 	/* Unlock the watchdog */
 	WDT_UNLOCK(config->base);
 
@@ -129,21 +130,6 @@ static int wdt_ti_lpf3_setup(const struct device *dev, uint8_t options)
 	} else {
 		WDT_STALL_DISABLE(config->base);
 	}
-
-#if WDT_HAS_CTL_REG
-	/* For devices with control register (CC27XX), configure reset behavior */
-	uint32_t ctl_value = WDT_CTL_EN_BIT;
-
-	if ((data->flags & WDT_FLAG_RESET_MASK) == WDT_FLAG_RESET_SOC) {
-		ctl_value |= WDT_CTL_RSTEN_BIT;
-		LOG_DBG("Reset enabled");
-	} else {
-		LOG_DBG("Reset disabled");
-	}
-
-	WDT_WRITE_CTL(config->base, ctl_value);
-	LOG_DBG("Control register value: 0x%08lx", WDT_GET_CTL(config->base));
-#endif
 
 	/* Feed the watchdog to start the counter with the configured reload value */
 	WDT_FEED(config->base, data->reload);
@@ -248,7 +234,6 @@ static const struct wdt_driver_api wdt_ti_lpf3_api = {
 #define WDT_TI_LPF3_INIT(index)								\
 	static struct wdt_ti_lpf3_data wdt_ti_lpf3_data_##index = {			\
 		.reload = WDT_MS_TO_TICKS(WDT_INITIAL_TIMEOUT),				\
-		.flags = 0,								\
 	};										\
 	static struct wdt_ti_lpf3_config wdt_ti_lpf3_config_##index = {			\
 		.base = DT_INST_REG_ADDR(index),						\
