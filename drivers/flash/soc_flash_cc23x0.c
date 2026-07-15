@@ -110,6 +110,16 @@ static int flash_cc23x0_write(const struct device *dev, off_t offs, const void *
 	}
 
 	/*
+	 * Flash is programmed in 128-bit flash word increments (TRM 7.2.4).
+	 * Enforcing the declared write-block-size also caps program
+	 * operations at 16 per 256-byte flash row, within the maximum of 83
+	 * allowed between erases (datasheet 7.11, note 4).
+	 */
+	if (((offs % FLASH_WRITE_SIZE) != 0) || ((size % FLASH_WRITE_SIZE) != 0)) {
+		return -EINVAL;
+	}
+
+	/*
 	 * From TI's HAL 'driverlib/flash.h':
 	 *
 	 * The pui8DataBuffer pointer can not point to flash.

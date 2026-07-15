@@ -114,6 +114,16 @@ static int flash_cc27xx_write(const struct device *dev, off_t offs,
 	}
 
 	/*
+	 * Enforcing the declared write-block-size caps program operations
+	 * at 16 per 256-byte flash row, within the maximum of 83 allowed
+	 * between erases (TRM 7.2.2.5); exceeding that limit can silently
+	 * corrupt erased bits in the row and no hardware check exists.
+	 */
+	if (((offs % FLASH_WRITE_SIZE) != 0) || ((size % FLASH_WRITE_SIZE) != 0)) {
+		return -EINVAL;
+	}
+
+	/*
 	 * From TI's HAL 'driverlib/flash.h':
 	 *
 	 * The pui8DataBuffer pointer can not point to flash.

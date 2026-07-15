@@ -15,6 +15,8 @@
  * issue even on an unfixed driver.
  */
 
+#include <string.h>
+
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/flash.h>
@@ -59,6 +61,29 @@ ZTEST(flash_ti_lpf3, test_write_read_out_of_range)
 		      "read beyond main flash must return -EINVAL");
 	zassert_equal(flash_read(flash_dev, FLASH_SIZE_B - WRITE_SIZE, buf, sizeof(buf)), -EINVAL,
 		      "read running past main flash must return -EINVAL");
+}
+
+/*
+ * Writes must be multiples of write-block-size at aligned offsets:
+ * cc23x0 programs in 128-bit flash word increments, and both families
+ * allow at most 83 program operations per 256-byte flash row between
+ * erases, silently corrupting the row past that. Sub-block writes must
+ * be rejected. Safe on an unfixed driver: only 0xff is "programmed"
+ * into an erased sector, which changes no bits.
+ */
+ZTEST(flash_ti_lpf3, test_write_alignment)
+{
+	static uint8_t wr[WRITE_SIZE + 1];
+
+	memset(wr, 0xff, sizeof(wr));
+	zassert_ok(flash_erase(flash_dev, STORAGE_OFF, ERASE_SIZE), "erase failed");
+
+	zassert_equal(flash_write(flash_dev, STORAGE_OFF + 1, wr, WRITE_SIZE), -EINVAL,
+		      "write at unaligned offset must return -EINVAL");
+	zassert_equal(flash_write(flash_dev, STORAGE_OFF, wr, 1), -EINVAL,
+		      "sub-write-block write must return -EINVAL");
+	zassert_equal(flash_write(flash_dev, STORAGE_OFF, wr, WRITE_SIZE + 1), -EINVAL,
+		      "write of non-multiple size must return -EINVAL");
 }
 
 /* Happy path: the checks above must not break normal operation */
