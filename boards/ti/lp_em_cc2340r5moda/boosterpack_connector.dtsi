@@ -9,14 +9,22 @@
 	boosterpack_header: connector {
 		compatible = "ti,boosterpack-header";
 		#gpio-cells = <2>;
-		gpio-map = <4 0 &gpio0 18 0>,
-				<6 0 &gpio0 12 0>,
-				<11 0 &gpio0 6 0>,
+		/*
+		 * Default connections per the SDK connector map
+		 * (source/ti/boards/.meta/LP_EM_CC2340R5MODA.syscfg.json).
+		 * Other DIO routings (BP.7/9/10/14/18) need jumpers on
+		 * headers P2/P6 or 0-ohm resistor changes and are not mapped.
+		 */
+		gpio-map = <3 0 &gpio0 20 0>,
+				<4 0 &gpio0 6 0>,
+				<5 0 &gpio0 4 0>,
+				<8 0 &gpio0 3 0>,
 				<12 0 &gpio0 24 0>,
-				<15 0 &gpio0 20 0>,
-				<23 0 &gpio0 11 0>,
+				<13 0 &gpio0 18 0>,
+				<15 0 &gpio0 12 0>,
 				<33 0 &gpio0 17 0>,
 				<34 0 &gpio0 16 0>,
+				<38 0 &gpio0 11 0>,
 				<39 0 &gpio0 21 0>,
 				<40 0 &gpio0 8 0>;
 	};
