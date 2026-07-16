@@ -395,6 +395,19 @@ static void uart_lpf3_irq_rx_enable(const struct device *dev)
 	 */
 	uart_lpf3_pm_policy_state_lock_get(dev->data, UART_LPF3_PM_LOCK_RX);
 
+	/*
+	 * Drop anything latched in the RX FIFO before RX was enabled. A byte
+	 * received while the caller had RX disabled is stale; delivering it
+	 * shifts the whole stream by one. On cc2745 a line glitch during pinctrl
+	 * mux latches a spurious leading 0x00 at init, which corrupted every
+	 * interrupt-driven RX (the async path already drains on rx_enable -- this
+	 * mirrors it so the interrupt path delivers only post-enable bytes).
+	 */
+	while (UARTCharAvailable(config->reg)) {
+		(void)UARTGetCharNonBlocking(config->reg);
+	}
+	UARTClearRxError(config->reg);
+
 	/* Trigger the ISR on both RX and Receive Timeout. This is to allow
 	 * the use of the hardware FIFOs for more efficient operation
 	 */
