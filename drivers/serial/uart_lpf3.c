@@ -545,7 +545,7 @@ static int uart_lpf3_tx_halt(struct uart_lpf3_data *data)
 		/* Unlock PM */
 		uart_lpf3_pm_policy_state_lock_put(data, UART_LPF3_PM_LOCK_TX);
 	} else {
-		return -EINVAL;
+		return -EFAULT;
 	}
 
 	return 0;
@@ -704,7 +704,7 @@ static int uart_lpf3_async_rx_disable(const struct device *dev)
 	key = irq_lock();
 
 	if (data->rx_len == 0) {
-		ret = -EINVAL;
+		ret = -EFAULT;
 		goto unlock;
 	}
 
