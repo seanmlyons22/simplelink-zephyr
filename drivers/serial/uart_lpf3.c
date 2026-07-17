@@ -771,10 +771,12 @@ static int uart_lpf3_async_rx_enable(const struct device *dev, uint8_t *buf, siz
 	 * With burst-only servicing (UDMA_01 workaround) a sub-watermark RX tail
 	 * never raises a burst request, so bytes below the FIFO watermark are left
 	 * in the FIFO. The RX-timeout interrupt (UART_INT_RT, asserted after 32
-	 * idle bit times) scavenges them by CPU into the DMA buffer.
+	 * idle bit times) scavenges them by CPU into the DMA buffer. The overrun
+	 * interrupt (UART_INT_OE) is enabled so an overrun is surfaced to the
+	 * application instead of dropping data silently.
 	 */
-	UARTClearInt(config->reg, UART_INT_RT);
-	UARTEnableInt(config->reg, UART_INT_RT);
+	UARTClearInt(config->reg, UART_INT_RT | UART_INT_OE);
+	UARTEnableInt(config->reg, UART_INT_RT | UART_INT_OE);
 
 	data->rx_buf = buf;
 	data->rx_len = len;
@@ -903,7 +905,7 @@ static int uart_lpf3_async_rx_disable(const struct device *dev)
 	k_work_cancel_delayable(&data->rx_timeout_work);
 	data->rx_delivery_pos = 0;
 
-	UARTDisableInt(config->reg, UART_INT_RT);
+	UARTDisableInt(config->reg, UART_INT_RT | UART_INT_OE);
 
 	dma_stop(config->dma_dev, config->dma_channel_rx);
 
@@ -992,7 +994,7 @@ static void uart_lpf3_rx_buf_complete(const struct device *dev)
 		data->rx_buf = NULL;
 		data->rx_len = 0;
 
-		UARTDisableInt(config->reg, UART_INT_RT);
+		UARTDisableInt(config->reg, UART_INT_RT | UART_INT_OE);
 
 		if (data->async_callback) {
 			evt.type = UART_RX_DISABLED;
@@ -1249,6 +1251,54 @@ static void uart_lpf3_isr(const struct device *dev)
 		}
 
 		irq_unlock(key);
+	}
+
+	if (int_status & UART_INT_OE) {
+		bool stopped = false;
+
+		/* Clear the RX error interrupt latches (RSR is cleared via err_check). */
+		UARTClearInt(config->reg,
+			     UART_INT_OE | UART_INT_BE | UART_INT_PE | UART_INT_FE);
+
+		key = irq_lock();
+
+		if (data->rx_len != 0) {
+			struct dma_status rx_stat;
+			size_t rx_count = data->rx_len;
+
+			if (dma_get_status(config->dma_dev, config->dma_channel_rx,
+					   &rx_stat) == 0) {
+				rx_count = data->rx_len - rx_stat.pending_length;
+			}
+
+			if (data->async_callback) {
+				evt.type = UART_RX_STOPPED;
+				evt.data.rx_stop.reason = uart_lpf3_err_check(dev);
+				evt.data.rx_stop.data.buf = data->rx_buf;
+				evt.data.rx_stop.data.offset = data->rx_processed_len;
+				evt.data.rx_stop.data.len = rx_count - data->rx_processed_len;
+
+				data->async_callback(dev, &evt, data->async_user_data);
+			}
+
+			/*
+			 * rx_processed_len is left untouched: the API promises an
+			 * RX_RDY for data received before the stop, which the
+			 * rx_disable below delivers (rx_stop.data is informational).
+			 */
+			stopped = true;
+		}
+
+		irq_unlock(key);
+
+		/*
+		 * An overrun desynchronizes the RX stream, so stop the transfer
+		 * (release buffers + UART_RX_DISABLED); the application re-enables.
+		 * Done outside the lock since rx_disable takes its own.
+		 */
+		if (stopped) {
+			(void)uart_lpf3_async_rx_disable(dev);
+		}
 	}
 #endif
 }
