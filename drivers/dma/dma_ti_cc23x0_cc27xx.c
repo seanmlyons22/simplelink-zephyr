@@ -334,6 +334,19 @@ static int dma_cc23x0_cc27xx_reload(const struct device *dev, uint32_t channel, 
 		return -EBUSY;
 	}
 
+	/*
+	 * Validate like dma_cc23x0_cc27xx_config() does. uDMASetChannelTransfer()
+	 * shifts the unmasked count into the control word, so an oversized (or
+	 * zero) transfer silently corrupts the XFER_SIZE and ARB fields instead
+	 * of failing.
+	 */
+	if (!xfer_size || xfer_size > UDMA_XFER_SIZE_MAX ||
+	    size != xfer_size * ch_data->data_size) {
+		LOG_ERR("Invalid block size (must be in range %d to %d)", ch_data->data_size,
+			ch_data->data_size * UDMA_XFER_SIZE_MAX);
+		return -EINVAL;
+	}
+
 	uDMASetChannelTransfer(&data->desc[channel], DMA_CC23X0_CC27XX_MODE(channel), (void *)src,
 			       (void *)dst, xfer_size);
 
