@@ -30,6 +30,8 @@
 #include <inc/hw_memmap.h>
 
 #ifdef CONFIG_UART_LPF3_DMA_DRIVEN
+#include <driverlib/udma.h>
+
 #define UART_LPF3_REG_GET(base, offset) ((base) + (offset))
 /*
  * For each DMA channel, burst transfer and single transfer request signals
@@ -663,6 +665,15 @@ static int uart_lpf3_async_rx_buf_rsp(const struct device *dev, uint8_t *buf, si
 	struct uart_lpf3_data *data = dev->data;
 	unsigned int key;
 	int ret = 0;
+
+	/*
+	 * The buffer swap loads this length via dma_reload(), which cannot
+	 * reject it asynchronously, so enforce the uDMA transfer limit here
+	 * where the caller still gets the error.
+	 */
+	if (!len || len > UDMA_XFER_SIZE_MAX) {
+		return -EINVAL;
+	}
 
 	key = irq_lock();
 
