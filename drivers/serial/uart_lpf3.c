@@ -138,8 +138,24 @@ static int uart_lpf3_poll_in(const struct device *dev, unsigned char *c)
 static void uart_lpf3_poll_out(const struct device *dev, unsigned char c)
 {
 	const struct uart_lpf3_config *config = dev->config;
+	unsigned int key;
 
-	UARTPutChar(config->reg, c);
+	/*
+	 * Claim a TX FIFO slot atomically. UARTPutChar()'s "wait for space then
+	 * write" is not atomic, so two concurrent poll_out() callers can both see
+	 * the last free entry and both write it -- silently dropping one byte (a
+	 * TX FIFO overflow is not flagged). Lock only around the check+write, not
+	 * the wait, so interrupts are not disabled while spinning.
+	 */
+	while (true) {
+		key = irq_lock();
+		if (UARTSpaceAvailable(config->reg)) {
+			UARTPutCharNonBlocking(config->reg, c);
+			irq_unlock(key);
+			break;
+		}
+		irq_unlock(key);
+	}
 
 #ifdef CONFIG_PM_DEVICE
 	/* Wait for character to be transmitted to ensure CPU
@@ -257,6 +273,17 @@ static int uart_lpf3_configure(const struct device *dev, const struct uart_confi
 	/* Make use of the FIFO to reduce chances of data being lost */
 	UARTEnableFifo(config->reg);
 
+#if defined(CONFIG_UART_INTERRUPT_DRIVEN)
+	/*
+	 * Interrupt-driven RX: trigger the RX interrupt as early as possible
+	 * (1/4 full = 2 of 8 entries) to maximize the drain headroom before an
+	 * overrun on the shallow 8-entry FIFO when the ISR is delayed (e.g. by
+	 * concurrent RF activity). The receive-timeout interrupt (UART_INT_RT)
+	 * still flushes the sub-watermark tail.
+	 */
+	UARTSetFifoLevel(config->reg, UART_FIFO_TX4_8, UART_FIFO_RX2_8);
+#endif
+
 	/*
 	 * Drop interrupt latches from before the reconfigure so a stale event
 	 * cannot fire into the reconfigured UART.
@@ -265,6 +292,19 @@ static int uart_lpf3_configure(const struct device *dev, const struct uart_confi
 				  UART_INT_OE | UART_INT_BE | UART_INT_PE | UART_INT_FE);
 
 	UARTEnable(config->reg);
+
+	/*
+	 * Drop anything latched in the RX FIFO from before this (re)configure.
+	 * On cc2745 a line glitch during the pinctrl mux latches a spurious
+	 * leading 0x00 at init, which shifts every later reception by one byte.
+	 * Draining here (not in irq_rx_enable) keeps the common throttling
+	 * idiom lossless: irq_rx_disable(), process, irq_rx_enable() must not
+	 * discard bytes that arrived in between.
+	 */
+	while (UARTCharAvailable(config->reg)) {
+		(void)UARTGetCharNonBlocking(config->reg);
+	}
+	UARTClearRxError(config->reg);
 
 	data->uart_config = *cfg;
 
@@ -411,6 +451,21 @@ static int uart_lpf3_irq_is_pending(const struct device *dev)
 
 	/* Read masked interrupt status */
 	uint32_t status = UARTIntStatus(config->reg, true);
+
+	/*
+	 * The TX FIFO-level interrupt is transition-triggered on this UART: it
+	 * does not stay asserted while the FIFO merely sits at/below the
+	 * watermark, so MIS.TX reads 0 at steady empty even though the callback
+	 * could send (uart_irq_tx_enable() bootstraps via NVIC_SetPendingIRQ for
+	 * exactly this reason). Surface TX-ready explicitly whenever the TX
+	 * interrupt is enabled, so a callback gated on `while
+	 * (uart_irq_is_pending())` -- the common Zephyr idiom -- actually starts
+	 * transmitting instead of exiting immediately and never filling the FIFO.
+	 */
+	if ((HWREG(config->reg + UART_O_IMSC) & UART_INT_TX) &&
+	    UARTSpaceAvailable(config->reg)) {
+		return 1;
+	}
 
 	return status ? 1 : 0;
 }
