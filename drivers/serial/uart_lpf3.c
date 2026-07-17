@@ -1048,9 +1048,9 @@ static void uart_lpf3_rx_buf_complete(const struct device *dev)
 
 static void uart_lpf3_isr(const struct device *dev)
 {
+	const struct uart_lpf3_config *config = dev->config;
 	struct uart_lpf3_data *data = dev->data;
 #if CONFIG_UART_LPF3_DMA_DRIVEN
-	const struct uart_lpf3_config *config = dev->config;
 	struct uart_event evt;
 	const uint8_t *tx_buf;
 	size_t tx_len;
@@ -1061,6 +1061,22 @@ static void uart_lpf3_isr(const struct device *dev)
 #if CONFIG_UART_INTERRUPT_DRIVEN
 	if (data->callback) {
 		data->callback(dev, data->user_data);
+	}
+
+	{
+		/*
+		 * err_check() clears the sticky RSR flags but not the interrupt
+		 * latches, so a line error with the error interrupts enabled
+		 * (uart_irq_err_enable) would otherwise re-enter the ISR forever.
+		 * Clear only what is pending in this pass; the DMA overrun
+		 * handler below works from its own status snapshot.
+		 */
+		uint32_t err_status = UARTIntStatus(config->reg, true) &
+				      (UART_INT_OE | UART_INT_BE | UART_INT_PE | UART_INT_FE);
+
+		if (err_status) {
+			UARTClearInt(config->reg, err_status);
+		}
 	}
 #endif
 
