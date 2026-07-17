@@ -414,6 +414,11 @@ static void uart_lpf3_irq_callback_set(const struct device *dev, uart_irq_callba
 
 	data->callback = cb;
 	data->user_data = user_data;
+
+#if defined(CONFIG_UART_LPF3_DMA_DRIVEN) && defined(CONFIG_UART_EXCLUSIVE_API_CALLBACKS)
+	data->async_callback = NULL;
+	data->async_user_data = NULL;
+#endif
 }
 
 #endif /* CONFIG_UART_INTERRUPT_DRIVEN */
@@ -425,12 +430,12 @@ static int uart_lpf3_async_callback_set(const struct device *dev, uart_callback_
 {
 	struct uart_lpf3_data *data = dev->data;
 
-#if defined(CONFIG_UART_EXCLUSIVE_API_CALLBACKS)
-	data->async_callback = NULL;
-	data->async_user_data = NULL;
-#else
 	data->async_callback = callback;
 	data->async_user_data = user_data;
+
+#if defined(CONFIG_UART_INTERRUPT_DRIVEN) && defined(CONFIG_UART_EXCLUSIVE_API_CALLBACKS)
+	data->callback = NULL;
+	data->user_data = NULL;
 #endif
 
 	return 0;
