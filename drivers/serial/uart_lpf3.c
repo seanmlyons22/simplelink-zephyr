@@ -246,11 +246,23 @@ static int uart_lpf3_configure(const struct device *dev, const struct uart_confi
 		UARTDisableRts(config->reg);
 	}
 
-	/* Re-enable UART */
-	UARTEnable(config->reg);
+	/*
+	 * Finish the line-control programming (LCRH.FEN, IFLS) while the UART is
+	 * still disabled, per the TRM programming sequence: disable, program BRD
+	 * and LCRH, then enable.
+	 */
 
 	/* Make use of the FIFO to reduce chances of data being lost */
 	UARTEnableFifo(config->reg);
+
+	/*
+	 * Drop interrupt latches from before the reconfigure so a stale event
+	 * cannot fire into the reconfigured UART.
+	 */
+	UARTClearInt(config->reg, UART_INT_RX | UART_INT_RT | UART_INT_TX | UART_INT_EOT |
+				  UART_INT_OE | UART_INT_BE | UART_INT_PE | UART_INT_FE);
+
+	UARTEnable(config->reg);
 
 	data->uart_config = *cfg;
 
