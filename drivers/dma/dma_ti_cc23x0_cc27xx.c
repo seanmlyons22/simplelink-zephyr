@@ -352,6 +352,8 @@ static int dma_cc23x0_cc27xx_reload(const struct device *dev, uint32_t channel, 
 static int dma_cc23x0_cc27xx_get_status(const struct device *dev, uint32_t channel,
 					struct dma_status *stat)
 {
+	struct dma_cc23x0_cc27xx_data *data = dev->data;
+	struct dma_cc23x0_cc27xx_channel *ch_data;
 	uint8_t ch_sel;
 
 	if (DMA_CC23X0_CC27XX_IS_ECH_CH(channel)) {
@@ -362,6 +364,18 @@ static int dma_cc23x0_cc27xx_get_status(const struct device *dev, uint32_t chann
 	if (channel >= UDMA_NUM_CHANNELS || !stat) {
 		return -EINVAL;
 	}
+
+	ch_data = &data->channels[channel];
+
+	/*
+	 * Report the real remaining transfer count. uDMAGetChannelSize() returns the
+	 * number of items still to transfer (0 when complete); scale by the item size
+	 * to get bytes. Callers (e.g. the UART async rx/tx abort paths) rely on
+	 * pending_length being accurate; leaving it unset makes them read stack
+	 * garbage and compute a bogus processed length.
+	 */
+	stat->busy = uDMAIsChannelEnabled(BIT(channel));
+	stat->pending_length = uDMAGetChannelSize(&data->desc[channel]) * ch_data->data_size;
 
 	ch_sel = DMA_CC23X0_CC27XX_CHXSEL_REG(channel) & EVTSVT_IPID_MAX_VAL;
 	switch (ch_sel) {
