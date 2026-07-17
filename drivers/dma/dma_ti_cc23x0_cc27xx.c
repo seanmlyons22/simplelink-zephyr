@@ -243,13 +243,15 @@ static int dma_cc23x0_cc27xx_config(const struct device *dev, uint32_t channel,
 	}
 
 	ch_data = &data->channels[channel];
+
+	if (uDMAIsChannelEnabled(BIT(channel))) {
+		/* Reject without clobbering the live channel's callback/state. */
+		return -EBUSY;
+	}
+
 	ch_data->data_size = data_size;
 	ch_data->cb = config->dma_callback;
 	ch_data->user_data = config->user_data;
-
-	if (uDMAIsChannelEnabled(BIT(channel))) {
-		return -EBUSY;
-	}
 
 	if (DMA_CC23X0_CC27XX_IS_ECH_CH(channel)) {
 		LOG_ERR("ECH channels are not supported");
