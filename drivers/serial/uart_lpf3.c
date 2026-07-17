@@ -29,6 +29,10 @@
 
 #include <inc/hw_memmap.h>
 
+#ifdef CONFIG_PM
+#include <ti/drivers/Power.h>
+#endif
+
 #ifdef CONFIG_UART_LPF3_DMA_DRIVEN
 #include <driverlib/udma.h>
 
@@ -109,6 +113,9 @@ struct uart_lpf3_data {
 #endif /* CONFIG_UART_LPF3_DMA_DRIVEN */
 #ifdef CONFIG_PM_DEVICE
 	ATOMIC_DEFINE(pm_lock, UART_LPF3_PM_LOCK_COUNT);
+#endif
+#ifdef CONFIG_PM
+	Power_NotifyObj pm_notify;
 #endif
 };
 
@@ -1390,10 +1397,16 @@ static int uart_lpf3_init_common(const struct device *dev)
 
 	UARTEnableInt(config->reg, UART_INT_TXDMADONE | UART_INT_RXDMADONE);
 
-	k_work_init_delayable(&data->tx_timeout_work, uart_lpf3_async_tx_timeout);
-	k_work_init_delayable(&data->rx_timeout_work, uart_lpf3_async_rx_timeout);
-
-	data->dev = dev;
+	/*
+	 * One-time init only: init_common() also runs on PM resume, and
+	 * re-initializing a possibly-scheduled work item is undefined. data->dev
+	 * is zero-initialized, so a NULL here marks the very first call.
+	 */
+	if (data->dev == NULL) {
+		k_work_init_delayable(&data->tx_timeout_work, uart_lpf3_async_tx_timeout);
+		k_work_init_delayable(&data->rx_timeout_work, uart_lpf3_async_rx_timeout);
+		data->dev = dev;
+	}
 #endif
 
 #ifdef CONFIG_PM_DEVICE
@@ -1404,6 +1417,44 @@ static int uart_lpf3_init_common(const struct device *dev)
 	/* Configure and enable UART */
 	return uart_lpf3_configure(dev, &data->uart_config);
 }
+
+#ifdef CONFIG_PM
+/*
+ * Standby powers down the peripheral domain: the UART's non-retained registers
+ * (baud, line control, FIFO, DMA/interrupt config) are lost and must be
+ * reprogrammed on wakeup -- mirrors the TI SDK UART2LPF3 AWAKE_STANDBY notify.
+ * The PM_DEVICE resume action only runs for system-managed device PM; this
+ * covers the configs where the device is not suspended around standby (e.g.
+ * CONFIG_PM_DEVICE_RUNTIME), where the console/DUT UART would otherwise be
+ * dead after the first standby cycle. init_common() is the same restore path
+ * PM_DEVICE_ACTION_RESUME uses (pinctrl/IOC is retained across standby).
+ */
+static int_fast16_t uart_lpf3_awake_notify(uint_fast16_t event_type, uintptr_t event_arg,
+					   uintptr_t client_arg)
+{
+	const struct device *dev = (const struct device *)client_arg;
+
+	ARG_UNUSED(event_type);
+	ARG_UNUSED(event_arg);
+
+#ifdef CONFIG_PM_DEVICE
+	enum pm_device_state state;
+
+	/*
+	 * Leave a device that device PM holds suspended alone: re-enabling its
+	 * clock here would leak power and desync the recorded PM state. Device
+	 * PM restores it through PM_DEVICE_ACTION_RESUME instead.
+	 */
+	if (pm_device_state_get(dev, &state) == 0 && state != PM_DEVICE_STATE_ACTIVE) {
+		return Power_NOTIFYDONE;
+	}
+#endif
+
+	(void)uart_lpf3_init_common(dev);
+
+	return Power_NOTIFYDONE;
+}
+#endif /* CONFIG_PM */
 
 #define UART_LPF3_INIT_FUNC(n)									\
 	static int uart_lpf3_init_##n(const struct device *dev)					\
@@ -1421,6 +1472,10 @@ static int uart_lpf3_init_common(const struct device *dev)
 			return ret;								\
 		}										\
 												\
+		IF_ENABLED(CONFIG_PM, (						                \
+			Power_registerNotify(&data->pm_notify, PowerLPF3_AWAKE_STANDBY,	        \
+					     uart_lpf3_awake_notify, (uintptr_t)dev);))		\
+												\
 		/* Enable interrupts */								\
 		UART_LPF3_IRQ_CFG(n);								\
 												\
@@ -1434,10 +1489,32 @@ static int uart_lpf3_pm_action(const struct device *dev, enum pm_device_action a
 	const struct uart_lpf3_config *config = dev->config;
 
 	switch (action) {
-	case PM_DEVICE_ACTION_SUSPEND:
+	case PM_DEVICE_ACTION_SUSPEND: {
+		unsigned int key = irq_lock();
+
+#ifdef CONFIG_UART_LPF3_DMA_DRIVEN
+		/*
+		 * Refuse to suspend mid-transfer: UARTDisable() clears LCRH.FEN
+		 * (flushing the RX FIFO) and drops DMACTL/IMSC, which would wedge
+		 * an in-flight async transfer (no completion ever arrives). The
+		 * check and the disable share one irq_lock so a transfer cannot
+		 * start in between. Interrupt-driven transfers are not covered;
+		 * those callers must quiesce before suspending.
+		 */
+		{
+			struct uart_lpf3_data *data = dev->data;
+
+			if (data->rx_len || data->tx_len) {
+				irq_unlock(key);
+				return -EBUSY;
+			}
+		}
+#endif
 		UARTDisable(config->reg);
 		CLKCTLDisable(CLKCTL_BASE, config->clkctl_id);
+		irq_unlock(key);
 		return 0;
+	}
 	case PM_DEVICE_ACTION_RESUME:
 		return uart_lpf3_init_common(dev);
 	default:
