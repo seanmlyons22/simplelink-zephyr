@@ -19,7 +19,7 @@
 
 K_SEM_DEFINE(tx_done, 0, 1);
 K_SEM_DEFINE(tx_aborted, 0, 1);
-K_SEM_DEFINE(rx_rdy, 0, 1);
+K_SEM_DEFINE(rx_rdy, 0, 20);
 K_SEM_DEFINE(rx_buf_coherency, 0, 255);
 K_SEM_DEFINE(rx_buf_released, 0, 1);
 K_SEM_DEFINE(rx_disabled, 0, 1);

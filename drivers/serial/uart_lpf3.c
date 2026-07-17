@@ -102,6 +102,10 @@ struct uart_lpf3_data {
 	size_t rx_processed_len;
 	uint8_t *rx_next_buf;
 	size_t rx_next_len;
+
+	int32_t rx_timeout_us;
+	struct k_work_delayable rx_timeout_work;
+	size_t rx_delivery_pos;
 #endif /* CONFIG_UART_LPF3_DMA_DRIVEN */
 #ifdef CONFIG_PM_DEVICE
 	ATOMIC_DEFINE(pm_lock, UART_LPF3_PM_LOCK_COUNT);
@@ -723,10 +727,6 @@ static int uart_lpf3_async_rx_enable(const struct device *dev, uint8_t *buf, siz
 		.user_data = NULL,
 	};
 
-	if (timeout != SYS_FOREVER_US) {
-		return -ENOTSUP;
-	}
-
 	key = irq_lock();
 
 	if (data->rx_len) {
@@ -779,6 +779,19 @@ static int uart_lpf3_async_rx_enable(const struct device *dev, uint8_t *buf, siz
 	data->rx_buf = buf;
 	data->rx_len = len;
 	data->rx_processed_len = 0;
+	data->rx_timeout_us = timeout;
+
+	/*
+	 * Delivery is driven by the RX-timeout (UART_INT_RT) interrupt, which
+	 * fires only when the line goes idle. With burst-only servicing a
+	 * partial buffer always strands a few sub-watermark bytes in the FIFO, so
+	 * RT is guaranteed to fire for it; the ISR then delivers inline or, when
+	 * the caller's timeout exceeds the RT window, schedules rx_timeout_work
+	 * for the remainder. Reading the DMA count only at idle (never
+	 * mid-transfer) is what avoids the uDMA arbitration-loss torn reads a
+	 * periodic poll caused (TRM 15.3.3; the TI SDK is likewise purely
+	 * RT/DMADONE driven).
+	 */
 
 	/* Request next buffer */
 	if (data->async_callback) {
@@ -847,6 +860,29 @@ static void uart_lpf3_notify_rx_processed(struct uart_lpf3_data *data, size_t pr
 	data->async_callback(data->dev, &evt, data->async_user_data);
 }
 
+/*
+ * Deliver the span recorded when the RX-timeout interrupt fired, once the
+ * caller's inactivity timeout has fully elapsed. The recorded bytes are
+ * stable (the DMA only appends), so delivering them is safe even if
+ * reception resumed in the meantime; newer bytes are delivered by the next
+ * RX-timeout or buffer completion.
+ */
+static void uart_lpf3_async_rx_timeout(struct k_work *work)
+{
+	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
+	struct uart_lpf3_data *data =
+		CONTAINER_OF(dwork, struct uart_lpf3_data, rx_timeout_work);
+	unsigned int key;
+
+	key = irq_lock();
+
+	if (data->rx_len != 0 && data->rx_delivery_pos > data->rx_processed_len) {
+		uart_lpf3_notify_rx_processed(data, data->rx_delivery_pos);
+	}
+
+	irq_unlock(key);
+}
+
 static int uart_lpf3_async_rx_disable(const struct device *dev)
 {
 	const struct uart_lpf3_config *config = dev->config;
@@ -864,6 +900,9 @@ static int uart_lpf3_async_rx_disable(const struct device *dev)
 		goto unlock;
 	}
 
+	k_work_cancel_delayable(&data->rx_timeout_work);
+	data->rx_delivery_pos = 0;
+
 	UARTDisableInt(config->reg, UART_INT_RT);
 
 	dma_stop(config->dma_dev, config->dma_channel_rx);
@@ -879,8 +918,7 @@ static int uart_lpf3_async_rx_disable(const struct device *dev)
 	/* Unlock PM */
 	uart_lpf3_pm_policy_state_lock_put(data, UART_LPF3_PM_LOCK_RX);
 
-	if (dma_get_status(config->dma_dev, config->dma_channel_rx, &status) == 0 &&
-	    status.pending_length) {
+	if (dma_get_status(config->dma_dev, config->dma_channel_rx, &status) == 0) {
 		rx_processed = data->rx_len - status.pending_length;
 
 		uart_lpf3_notify_rx_processed(data, rx_processed);
@@ -931,6 +969,14 @@ static void uart_lpf3_rx_buf_complete(const struct device *dev)
 	const struct uart_lpf3_config *config = dev->config;
 	struct uart_lpf3_data *data = dev->data;
 	struct uart_event evt;
+
+	/*
+	 * A pending inactivity delivery refers to this buffer; everything is
+	 * delivered here, and a stale rx_delivery_pos must not leak into the
+	 * next buffer (the reset also stops a handler that already started).
+	 */
+	k_work_cancel_delayable(&data->rx_timeout_work);
+	data->rx_delivery_pos = 0;
 
 	uart_lpf3_notify_rx_processed(data, data->rx_len);
 
@@ -1115,8 +1161,11 @@ static void uart_lpf3_isr(const struct device *dev)
 			 * Single requests are disabled (UDMA_01 workaround), so
 			 * bytes below the RX FIFO watermark never trigger the DMA.
 			 * On RX idle, pause the DMA, drain the stragglers by CPU
-			 * into the buffer, complete the buffer if that fills it,
-			 * then resume the DMA over the remainder.
+			 * into the buffer, deliver what was received (per the
+			 * configured timeout mode), then resume the DMA over the
+			 * remainder. Delivering here is contention-free (idle, no
+			 * burst in flight) and, unlike a deferred timer, cannot
+			 * race an active transfer after a mid-stream buffer swap.
 			 */
 			UARTDisableDMA(config->reg, UART_DMA_RX);
 			dma_stop(config->dma_dev, config->dma_channel_rx);
@@ -1144,6 +1193,34 @@ static void uart_lpf3_isr(const struct device *dev)
 
 					uart_lpf3_rx_buf_complete(dev);
 				} else {
+					/*
+					 * Partial buffer. UART_INT_RT fires after 32 bit
+					 * times of line idle; the API asks for RX_RDY
+					 * after rx_timeout_us of inactivity. Deliver now
+					 * when the hardware window already covers the
+					 * timeout, otherwise schedule delivery of the
+					 * bytes received so far for the remainder. If
+					 * reception resumes before the deadline, the
+					 * recorded fragment is still delivered -- earlier
+					 * than a strict per-byte clock, never later.
+					 * SYS_FOREVER_US keeps buffer-driven delivery.
+					 */
+					if (data->rx_timeout_us != SYS_FOREVER_US) {
+						int32_t rt_us = (int32_t)(32000000LL /
+							data->uart_config.baudrate);
+
+						if (data->rx_timeout_us <= rt_us) {
+							uart_lpf3_notify_rx_processed(data,
+										      pos);
+						} else {
+							data->rx_delivery_pos = pos;
+							k_work_reschedule(
+								&data->rx_timeout_work,
+								K_USEC(data->rx_timeout_us -
+								       rt_us));
+						}
+					}
+
 					dma_reload(config->dma_dev,
 						   config->dma_channel_rx,
 						   (uint32_t)UART_LPF3_REG_GET(
@@ -1248,6 +1325,7 @@ static int uart_lpf3_init_common(const struct device *dev)
 	UARTEnableInt(config->reg, UART_INT_TXDMADONE | UART_INT_RXDMADONE);
 
 	k_work_init_delayable(&data->tx_timeout_work, uart_lpf3_async_tx_timeout);
+	k_work_init_delayable(&data->rx_timeout_work, uart_lpf3_async_rx_timeout);
 
 	data->dev = dev;
 #endif
