@@ -587,6 +587,19 @@ static int uart_lpf3_async_tx(const struct device *dev, const uint8_t *buf, size
 	/* Lock PM */
 	uart_lpf3_pm_policy_state_lock_get(data, UART_LPF3_PM_LOCK_TX);
 
+	/*
+	 * Mask and clear EOT so RIS.EOT reflects only THIS transfer. The ISR
+	 * completes the transfer (fires TX_DONE) on EOT -- once the TX FIFO + line
+	 * have fully drained -- so a chained 2nd uart_tx re-arms on an empty FIFO
+	 * (see the TXDMADONE handler; serial-3 UDMA_01 chained-TX corruption).
+	 * Masking matters when this transfer chains from an abort: the aborted
+	 * tail leaves EOT enabled to release the PM lock, and its drain-complete
+	 * event must not fire TX_DONE for this new transfer. The lock stays held
+	 * (already taken) and is released by this transfer's own EOT.
+	 */
+	UARTDisableInt(config->reg, UART_INT_EOT);
+	UARTClearInt(config->reg, UART_INT_EOT);
+
 	/* Enable DMA trigger to start the transfer */
 	UARTEnableDMA(config->reg, UART_DMA_TX);
 
@@ -614,6 +627,14 @@ static int uart_lpf3_tx_halt(struct uart_lpf3_data *data)
 
 	dma_stop(config->dma_dev, config->dma_channel_tx);
 
+	/*
+	 * Up to 8 FIFO bytes plus the shift register still drain onto the wire.
+	 * Keep the TX standby lock until the line is idle: leave EOT enabled and
+	 * let the ISR release the lock on the drain-complete event. tx_len is
+	 * already 0, so that EOT cannot signal TX_DONE for the aborted transfer.
+	 */
+	UARTEnableInt(config->reg, UART_INT_EOT);
+
 	irq_unlock(key);
 
 	if (dma_get_status(config->dma_dev, config->dma_channel_tx, &status) == 0) {
@@ -625,8 +646,7 @@ static int uart_lpf3_tx_halt(struct uart_lpf3_data *data)
 			data->async_callback(data->dev, &evt, data->async_user_data);
 		}
 
-		/* Unlock PM */
-		uart_lpf3_pm_policy_state_lock_put(data, UART_LPF3_PM_LOCK_TX);
+		/* The EOT interrupt releases the TX standby lock after line drain */
 	} else {
 		return -EFAULT;
 	}
@@ -962,6 +982,8 @@ static void uart_lpf3_isr(const struct device *dev)
 #if CONFIG_UART_LPF3_DMA_DRIVEN
 	const struct uart_lpf3_config *config = dev->config;
 	struct uart_event evt;
+	const uint8_t *tx_buf;
+	size_t tx_len;
 	unsigned int key;
 	uint32_t int_status = UARTIntStatus(config->reg, true);
 #endif
@@ -979,17 +1001,46 @@ static void uart_lpf3_isr(const struct device *dev)
 	 * It is not signaled on the DMA dedicated interrupt.
 	 */
 	if (int_status & UART_INT_TXDMADONE) {
+		/*
+		 * DMA has finished filling the TX FIFO, but bytes may still be in
+		 * the FIFO/shift register. Defer TX_DONE to the EOT interrupt, which
+		 * fires once the TX FIFO AND the TX line are fully drained (TRM 19.6
+		 * RIS.EOT). This makes TX_DONE mean "transmitted" and, crucially,
+		 * guarantees a 2nd uart_tx() chained from the callback re-arms the DMA
+		 * on an EMPTY TX FIFO. Re-arming into the 1st transfer's still-full
+		 * FIFO at high baud hits the UDMA_01 dropped-write window and garbles
+		 * the 2nd buffer (serial-3). RIS.EOT was cleared in uart_lpf3_async_tx,
+		 * so unmasking it now fires exactly once for this transfer -- either
+		 * on a later ISR entry once drain completes, or right away if the
+		 * short transfer already drained.
+		 */
+		UARTClearInt(config->reg, UART_INT_TXDMADONE);
+
+		if (UARTBusy(config->reg)) {
+			/*
+			 * A busy line with EOT latched means the latch is stale: it
+			 * is the drain-complete of an aborted transfer's tail that
+			 * finished after this transfer's setup cleared EOT. Drop it;
+			 * this transfer's own EOT latches once its bytes leave the
+			 * wire. Safe because with the line busy the real completion
+			 * cannot land between the check and the clear.
+			 */
+			UARTClearInt(config->reg, UART_INT_EOT);
+		}
+
+		UARTEnableInt(config->reg, UART_INT_EOT);
+	}
+
+	if (int_status & UART_INT_EOT) {
+		UARTDisableInt(config->reg, UART_INT_EOT);
+		UARTClearInt(config->reg, UART_INT_EOT);
+
 		k_work_cancel_delayable(&data->tx_timeout_work);
 
 		key = irq_lock();
 
-		if (data->tx_len && data->async_callback) {
-			evt.type = UART_TX_DONE;
-			evt.data.tx.buf = data->tx_buf;
-			evt.data.tx.len = data->tx_len;
-
-			data->async_callback(dev, &evt, data->async_user_data);
-		}
+		tx_buf = data->tx_buf;
+		tx_len = data->tx_len;
 
 		data->tx_buf = NULL;
 		data->tx_len = 0;
@@ -997,9 +1048,20 @@ static void uart_lpf3_isr(const struct device *dev)
 		/* Unlock PM */
 		uart_lpf3_pm_policy_state_lock_put(data, UART_LPF3_PM_LOCK_TX);
 
-		irq_unlock(key);
+		/*
+		 * Clear the TX state before running the callback, so that a new
+		 * uart_tx() chained from the UART_TX_DONE callback is not
+		 * rejected with -EBUSY.
+		 */
+		if (tx_len && data->async_callback) {
+			evt.type = UART_TX_DONE;
+			evt.data.tx.buf = tx_buf;
+			evt.data.tx.len = tx_len;
 
-		UARTClearInt(config->reg, UART_INT_TXDMADONE);
+			data->async_callback(dev, &evt, data->async_user_data);
+		}
+
+		irq_unlock(key);
 	}
 
 	if (int_status & UART_INT_RXDMADONE) {
