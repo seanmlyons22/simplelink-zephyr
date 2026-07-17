@@ -23,6 +23,10 @@ LOG_MODULE_REGISTER(dma_cc23x0_cc27xx, CONFIG_DMA_LOG_LEVEL);
 #include <inc/hw_memmap.h>
 #include <inc/hw_types.h>
 
+#ifdef CONFIG_PM
+#include <ti/drivers/Power.h>
+#endif
+
 /*
  * For CC23XX Channels 0 to 5 are DCH channels assigned to peripherals.
  * Channels 6 and 7 are ECH channels with no specific assignment.
@@ -464,11 +468,40 @@ static int dma_cc23x0_cc27xx_enable(struct dma_cc23x0_cc27xx_data *data)
 	return 0;
 }
 
+#ifdef CONFIG_PM
+
+static Power_NotifyObj dma_cc23x0_cc27xx_awake_notify;
+
+/* Standby powers down the peripheral domain: the uDMA control table base
+ * (DMA.CTRL) and master enable are lost and must be reprogrammed on every
+ * wakeup (mirrors the TI SDK's UDMALPF3 AWAKE_STANDBY notification). The
+ * PM_DEVICE resume action only covers system-managed device PM; this
+ * notification also covers configurations where devices are not suspended
+ * around standby (e.g. CONFIG_PM_DEVICE_RUNTIME).
+ */
+static int_fast16_t dma_cc23x0_cc27xx_awake_cb(uint_fast16_t eventType, uintptr_t eventArg,
+					       uintptr_t clientArg)
+{
+	ARG_UNUSED(eventType);
+	ARG_UNUSED(eventArg);
+
+	dma_cc23x0_cc27xx_enable((struct dma_cc23x0_cc27xx_data *)clientArg);
+
+	return Power_NOTIFYDONE;
+}
+
+#endif /* CONFIG_PM */
+
 static int dma_cc23x0_cc27xx_init(const struct device *dev)
 {
 	IRQ_CONNECT(DT_INST_IRQN(0), DT_INST_IRQ(0, priority), dma_cc23x0_cc27xx_isr,
 		    DEVICE_DT_INST_GET(0), 0);
 	irq_enable(DT_INST_IRQN(0));
+
+#ifdef CONFIG_PM
+	Power_registerNotify(&dma_cc23x0_cc27xx_awake_notify, PowerLPF3_AWAKE_STANDBY,
+			     dma_cc23x0_cc27xx_awake_cb, (uintptr_t)dev->data);
+#endif
 
 	return dma_cc23x0_cc27xx_enable(dev->data);
 }
