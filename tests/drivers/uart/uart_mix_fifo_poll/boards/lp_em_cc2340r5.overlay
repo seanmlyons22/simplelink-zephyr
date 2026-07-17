@@ -1,0 +1,62 @@
+/*
+ * Copyright (c) 2026 Texas Instruments Incorporated
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * lp_em_cc2340r5 has a single UART (uart0), normally the console. To test the
+ * UART we free it: the console moves to SEGGER RTT (rtt.conf is injected by
+ * the run harness) and uart0 becomes the DUT.
+ *
+ * Loopback: external jumper DIO20 (uart0 TXD) -> DIO22 (uart0 RXD).
+ *
+ * Hardware flow control: this test's zero-loss contract holds only when RTS/CTS
+ * pauses TX while RX is drained. Enable it here (hw-flow-control + RTS/CTS pins)
+ * and add a second self-loopback jumper DIO8 (uart0 RTS) -> DIO21 (uart0 CTS).
+ * With flow control wired the RX FIFO no longer overruns, so the suite takes its
+ * strict zero-loss / full-count path; remove the jumper (or hw-flow-control) and
+ * it falls back to the overrun-tolerant path. Kept in the test overlay so the
+ * board default pinctrl does not reserve DIO8/DIO21 for other applications.
+ *
+ * uart_mix_fifo_poll needs a counter for its timing loop: alias counter_dev to
+ * lgpt0, which the board enables and whose PWM children are unused (only
+ * pwm5/pwm6 on lgpt1/lgpt2 are active). The LGPT counter driver
+ * (ti,cc23x0-lgpt) provides the periodic top-value callback the test relies on.
+ */
+
+#include <zephyr/dt-bindings/pinctrl/cc23x0-pinctrl.h>
+
+/ {
+	chosen {
+		/delete-property/ zephyr,console;
+		/delete-property/ zephyr,shell-uart;
+	};
+};
+
+&pinctrl {
+	uart0_rts_default: uart0_rts_default {
+		pinmux = <8 DIO8_UART0_RTS>;
+		bias-disable;
+	};
+	uart0_cts_default: uart0_cts_default {
+		pinmux = <21 DIO21_UART0_CTS>;
+		bias-pull-up;
+		input-enable;
+	};
+};
+
+dut: &uart0 {
+	status = "okay";
+	/*
+	 * 1 Mbaud (not the generic 115200): at 115200 the mixed poll/timer/thread
+	 * load never fills the 8-entry RX FIFO on this M0+, so flow control is never
+	 * exercised. At 1 Mbaud the FIFO overruns without RTS/CTS (measured: 63
+	 * overruns), and 0 with it -- so this baud actually tests the mechanism.
+	 */
+	current-speed = <1000000>;
+	hw-flow-control;
+	pinctrl-0 = <&uart0_tx_default &uart0_rx_default
+		     &uart0_rts_default &uart0_cts_default>;
+};
+
+counter_dev: &lgpt0 {
+	status = "okay";
+};
