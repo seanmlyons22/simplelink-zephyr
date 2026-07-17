@@ -550,6 +550,13 @@ static int uart_lpf3_async_tx(const struct device *dev, const uint8_t *buf, size
 		.user_data = NULL,
 	};
 
+	/*
+	 * Hold the transfer setup atomic against a concurrent tx_abort/timeout:
+	 * otherwise tx_halt could stop the channel between dma_start and
+	 * UARTEnableDMA and we would then re-start a transfer the caller was told
+	 * was aborted. On any setup error, clear the TX state so a later uart_tx()
+	 * is not wedged at -EBUSY.
+	 */
 	key = irq_lock();
 
 	if (data->tx_len) {
@@ -560,11 +567,9 @@ static int uart_lpf3_async_tx(const struct device *dev, const uint8_t *buf, size
 	data->tx_buf = buf;
 	data->tx_len = len;
 
-	irq_unlock(key);
-
 	ret = dma_config(config->dma_dev, config->dma_channel_tx, &dma_cfg_tx);
 	if (ret) {
-		return ret;
+		goto err;
 	}
 
 	/* Respond to burst requests only (UDMA_01 workaround) */
@@ -573,15 +578,15 @@ static int uart_lpf3_async_tx(const struct device *dev, const uint8_t *buf, size
 	/* Disable DMA trigger */
 	UARTDisableDMA(config->reg, UART_DMA_TX);
 
-	/* Schedule timeout work */
-	if (timeout != SYS_FOREVER_US) {
-		k_work_reschedule(&data->tx_timeout_work, K_USEC(timeout));
-	}
-
 	/* Start DMA channel */
 	ret = dma_start(config->dma_dev, config->dma_channel_tx);
 	if (ret) {
-		return ret;
+		goto err;
+	}
+
+	/* Schedule timeout work */
+	if (timeout != SYS_FOREVER_US) {
+		k_work_reschedule(&data->tx_timeout_work, K_USEC(timeout));
 	}
 
 	/* Lock PM */
@@ -603,7 +608,15 @@ static int uart_lpf3_async_tx(const struct device *dev, const uint8_t *buf, size
 	/* Enable DMA trigger to start the transfer */
 	UARTEnableDMA(config->reg, UART_DMA_TX);
 
+	irq_unlock(key);
+
 	return 0;
+
+err:
+	data->tx_buf = NULL;
+	data->tx_len = 0;
+	irq_unlock(key);
+	return ret;
 }
 
 static int uart_lpf3_tx_halt(struct uart_lpf3_data *data)
@@ -628,6 +641,15 @@ static int uart_lpf3_tx_halt(struct uart_lpf3_data *data)
 	dma_stop(config->dma_dev, config->dma_channel_tx);
 
 	/*
+	 * Mask the TX DMA request and clear any latched TXDMADONE: a completion
+	 * that raced this abort must not fire into the next transfer. Compute the
+	 * aborted length while still locked so a new uart_tx() cannot race the
+	 * pending-count read.
+	 */
+	UARTDisableDMA(config->reg, UART_DMA_TX);
+	UARTClearInt(config->reg, UART_INT_TXDMADONE);
+
+	/*
 	 * Up to 8 FIFO bytes plus the shift register still drain onto the wire.
 	 * Keep the TX standby lock until the line is idle: leave EOT enabled and
 	 * let the ISR release the lock on the drain-complete event. tx_len is
@@ -635,11 +657,11 @@ static int uart_lpf3_tx_halt(struct uart_lpf3_data *data)
 	 */
 	UARTEnableInt(config->reg, UART_INT_EOT);
 
-	irq_unlock(key);
-
 	if (dma_get_status(config->dma_dev, config->dma_channel_tx, &status) == 0) {
 		evt.data.tx.len = total_len - status.pending_length;
 	}
+
+	irq_unlock(key);
 
 	if (total_len) {
 		if (data->async_callback) {
@@ -1065,13 +1087,19 @@ static void uart_lpf3_isr(const struct device *dev)
 	}
 
 	if (int_status & UART_INT_RXDMADONE) {
+		UARTClearInt(config->reg, UART_INT_RXDMADONE);
+
 		key = irq_lock();
+
+		if (data->rx_len == 0) {
+			/* RX already stopped by uart_lpf3_async_rx_disable() */
+			irq_unlock(key);
+			return;
+		}
 
 		uart_lpf3_rx_buf_complete(dev);
 
 		irq_unlock(key);
-
-		UARTClearInt(config->reg, UART_INT_RXDMADONE);
 	}
 
 	if (int_status & UART_INT_RT) {
